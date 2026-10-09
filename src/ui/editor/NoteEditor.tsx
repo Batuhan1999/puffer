@@ -22,11 +22,12 @@ function NativeNoteView(props: NoteEditorProps) {
   return <NoteEditorView {...props} />;
 }
 
-/** Editors by EXPO_PUBLIC_PUFFER_EDITOR; Tiptap (src/ui/editor/TiptapNoteView.tsx) unless another is named. Each loads,
- * saves and closes its note itself and takes the same props and handle. */
+/** Editors by EXPO_PUBLIC_PUFFER_EDITOR=native|tiptap (enriched: the note route); native unless another is named, until
+ * Tiptap (src/ui/editor/TiptapNoteView.tsx) is validated on the device. Each loads, saves and closes its note itself and
+ * takes the same props and handle. */
 const EDITORS = { tiptap: TiptapNoteView, native: NativeNoteView } as const;
 const chosen = process.env.EXPO_PUBLIC_PUFFER_EDITOR;
-const EditorView = chosen && chosen in EDITORS ? EDITORS[chosen as keyof typeof EDITORS] : EDITORS.tiptap;
+const EditorView = chosen && chosen in EDITORS ? EDITORS[chosen as keyof typeof EDITORS] : EDITORS.native;
 
 /** One note, in the editor EXPO_PUBLIC_PUFFER_EDITOR picks. */
 export function NoteEditor({ id }: { id: string }) {

@@ -52,7 +52,8 @@
     "ios": "expo run:ios",
     "web": "expo start --web",
     "lint": "expo lint",
-    "postinstall": "patch-package"
+    "postinstall": "patch-package",
+    "test:editor": "node scripts/editor-markdown-check/tiptap.mjs"
   },
   "private": true
 }

@@ -55,6 +55,11 @@ const corpus = [
   '[Groceries](puffer://note/abc) and #errand', '# T\n|  |  |\n| --- | --- |\n|  |  |\n', '# T\n*\n-\n1.\n- [ ]\n- [x]',
   '# Plan\n- [ ] a\n    - [x] b\n        1. c\n    - d\n- [ ] e', '> # quoted title\n> body\n> - item', '**`bold code`** and ``a`b``',
   '# T\nline one\nline two\n\n\nafter blanks', '# Groceries\nPlain line one\nPlain line two\n- [ ] milk\nafter list',
+  // The editor's own features: colored highlights, attachments in lists and tables, note links, tags beside markup.
+  '# Colors\n<mark data-color="pink">pink</mark> <mark data-color="orange">**bold orange**</mark> <mark data-color="blue">*blue*</mark> ==purple==',
+  '# Files\n- [ ] ![Scan](attachment:scan1.pdf)\n- ![Drawing](attachment:d.drawing)\n| photo | note |\n| --- | --- |\n| ![P](attachment:p.jpg) | [Trip](puffer://note/x1) |',
+  '# Tags\n#home and #work-2026, not a#b or http://x.y/#z, `#code`, **#bold** and ## not a heading',
+  '# Title\n## Section\ntext\n### Sub\nmore\n## Next\n- [x] done <u>under</u> ~~strike~~',
 ];
 
 // Paragraph model checks, as main.swift does them.
@@ -173,15 +178,18 @@ for (const text of inputs) {
   check(md.normalize(once) === once, 'fixed point', `\n--- md ${show(text)}\n--- once ${show(once)}`);
 }
 
-const native = JSON.parse(execFileSync(normalizeBinary, { input: JSON.stringify(inputs), maxBuffer: 1 << 28 }).toString());
-let differs = 0;
-inputs.forEach((text, n) => {
-  if (md.normalize(text) !== native[n]) {
-    differs += 1;
-    if (differs <= 5) console.log(`NATIVE DIFFERS\n--- md ${show(text)}\n--- tiptap ${show(md.normalize(text))}\n--- native ${show(native[n])}`);
-  }
-});
-check(differs === 0, 'same Markdown as the native editor', `${differs} of ${inputs.length}`);
+// Without the binary (no Swift, e.g. Linux or CI: `node tiptap.mjs`) the comparison with native is skipped.
+if (normalizeBinary) {
+  const native = JSON.parse(execFileSync(normalizeBinary, { input: JSON.stringify(inputs), maxBuffer: 1 << 28 }).toString());
+  let differs = 0;
+  inputs.forEach((text, n) => {
+    if (md.normalize(text) !== native[n]) {
+      differs += 1;
+      if (differs <= 5) console.log(`NATIVE DIFFERS\n--- md ${show(text)}\n--- tiptap ${show(md.normalize(text))}\n--- native ${show(native[n])}`);
+    }
+  });
+  check(differs === 0, 'same Markdown as the native editor', `${differs} of ${inputs.length}`);
+} else console.log('No normalize binary: skipped the byte comparison with the native editor');
 
 // A list line deeper than the line above it plus one (possible after a quoted list) has no parent in a tree of lists,
 // so the editor moves it up to the deepest level it can nest at. The one place the Tiptap editor changes a note.
