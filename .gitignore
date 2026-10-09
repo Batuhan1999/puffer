@@ -39,3 +39,6 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# LiteRT-LM binary and Swift sources, fetched by scripts/fetch-litert.sh
+modules/puffer-native/ios/vendor/

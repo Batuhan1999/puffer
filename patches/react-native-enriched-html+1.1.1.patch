@@ -1,0 +1,369 @@
+diff --git a/node_modules/react-native-enriched-html/ios/EnrichedTextInputView.mm b/node_modules/react-native-enriched-html/ios/EnrichedTextInputView.mm
+index a899aa6..01c953a 100644
+--- a/node_modules/react-native-enriched-html/ios/EnrichedTextInputView.mm
++++ b/node_modules/react-native-enriched-html/ios/EnrichedTextInputView.mm
+@@ -1228,6 +1228,8 @@ - (void)handleCommand:(const NSString *)commandName args:(const NSArray *)args {
+     [self toggleRegularStyle:[StrikethroughStyle getType]];
+   } else if ([commandName isEqualToString:@"toggleInlineCode"]) {
+     [self toggleRegularStyle:[InlineCodeStyle getType]];
++  } else if ([commandName isEqualToString:@"toggleHighlight"]) {
++    [self toggleHighlight:(NSString *)args[0]];
+   } else if ([commandName isEqualToString:@"addLink"]) {
+     NSInteger start = [((NSNumber *)args[0]) integerValue];
+     NSInteger end = [((NSNumber *)args[1]) integerValue];
+@@ -1503,6 +1505,18 @@ - (void)toggleRegularStyle:(StyleType)type {
+   }
+ }
+ 
++- (void)toggleHighlight:(NSString *)color {
++  HighlightStyle *style =
++      (HighlightStyle *)stylesDict[@([HighlightStyle getType])];
++  NSRange range = textView.selectedRange;
++  if ([StyleUtils handleStyleBlocksAndConflicts:[HighlightStyle getType]
++                                          range:range
++                                        forHost:self]) {
++    [style toggleWithColor:color range:range];
++    [self anyTextMayHaveBeenModified];
++  }
++}
++
+ - (void)toggleCheckboxList:(BOOL)checked {
+   CheckboxListStyle *style =
+       (CheckboxListStyle *)stylesDict[@([CheckboxListStyle getType])];
+diff --git a/node_modules/react-native-enriched-html/ios/htmlParser/HtmlParser.mm b/node_modules/react-native-enriched-html/ios/htmlParser/HtmlParser.mm
+index 0ed3d87..e52151d 100644
+--- a/node_modules/react-native-enriched-html/ios/htmlParser/HtmlParser.mm
++++ b/node_modules/react-native-enriched-html/ios/htmlParser/HtmlParser.mm
+@@ -729,6 +729,19 @@ + (NSArray *_Nonnull)getTextAndStylesFromHtml:(NSString *_Nonnull)fixedHtml
+       [styleArr addObject:@([StrikethroughStyle getType])];
+     } else if ([tagName isEqualToString:@"code"]) {
+       [styleArr addObject:@([InlineCodeStyle getType])];
++    } else if ([tagName isEqualToString:@"mark"]) {
++      NSRegularExpression *colorRegex = [NSRegularExpression
++          regularExpressionWithPattern:@"data-color=\"([a-z]+)\""
++                               options:0
++                                 error:nil];
++      NSTextCheckingResult *colorMatch =
++          [colorRegex firstMatchInString:params
++                                 options:0
++                                   range:NSMakeRange(0, params.length)];
++      [styleArr addObject:@([HighlightStyle getType])];
++      stylePair.styleValue =
++          colorMatch ? [params substringWithRange:[colorMatch rangeAtIndex:1]]
++                     : @"purple";
+     } else if ([tagName isEqualToString:@"a"]) {
+       NSRegularExpression *hrefRegex =
+           [NSRegularExpression regularExpressionWithPattern:@"href=\".+\""
+@@ -1165,6 +1178,21 @@ + (NSString *)parseToHtmlFromRange:(NSRange)range
+       NSMutableSet *stillActiveStyles = [previousActiveStyles mutableCopy];
+       [stillActiveStyles intersectSet:currentActiveStyles];
+ 
++      // a highlight whose color changes mid-run closes and reopens its <mark>
++      NSNumber *highlight = @([HighlightStyle getType]);
++      if (i > 0 && [stillActiveStyles containsObject:highlight] &&
++          ![[host.textView.textStorage attribute:@"EnrichedHighlight"
++                                         atIndex:currentRange.location
++                                  effectiveRange:nil]
++              isEqual:[host.textView.textStorage
++                               attribute:@"EnrichedHighlight"
++                                 atIndex:currentRange.location - 1
++                          effectiveRange:nil]]) {
++        [stillActiveStyles removeObject:highlight];
++        [newStyles addObject:highlight];
++        [fixedEndedStyles addObject:highlight];
++      }
++
+       for (NSNumber *style in newStyles) {
+         for (NSNumber *ongoingStyle in stillActiveStyles) {
+           if ([ongoingStyle integerValue] > [style integerValue]) {
+@@ -1356,6 +1384,16 @@ + (NSString *)tagContentForStyle:(NSNumber *)style
+     return @"s";
+   } else if ([style isEqualToNumber:@([InlineCodeStyle getType])]) {
+     return @"code";
++  } else if ([style isEqualToNumber:@([HighlightStyle getType])]) {
++    if (!openingTag) {
++      return @"mark";
++    }
++    NSString *color =
++        [host.textView.textStorage attribute:@"EnrichedHighlight"
++                                     atIndex:location
++                              effectiveRange:nil];
++    return [NSString stringWithFormat:@"mark data-color=\"%@\"",
++                                      color ?: @"purple"];
+   } else if ([style isEqualToNumber:@([LinkStyle getType])]) {
+     if (openingTag) {
+       LinkStyle *linkStyle =
+diff --git a/node_modules/react-native-enriched-html/ios/inputHtmlParser/InputHtmlParser.mm b/node_modules/react-native-enriched-html/ios/inputHtmlParser/InputHtmlParser.mm
+index 05c331b..48c7a09 100644
+--- a/node_modules/react-native-enriched-html/ios/inputHtmlParser/InputHtmlParser.mm
++++ b/node_modules/react-native-enriched-html/ios/inputHtmlParser/InputHtmlParser.mm
+@@ -182,6 +182,11 @@ - (void)applyProcessedStyles:(NSArray *)processedStyles
+             }
+           }
+         }
++      } else if ([styleType isEqualToNumber:@([HighlightStyle getType])]) {
++        [baseStyle add:styleRange
++                 withValue:stylePair.styleValue
++                withTyping:shouldAddTypingAttr
++            withDirtyRange:YES];
+       } else {
+         [baseStyle add:styleRange
+                 withTyping:shouldAddTypingAttr
+diff --git a/node_modules/react-native-enriched-html/ios/interfaces/StyleHeaders.h b/node_modules/react-native-enriched-html/ios/interfaces/StyleHeaders.h
+index aca5d4a..6a72e6b 100644
+--- a/node_modules/react-native-enriched-html/ios/interfaces/StyleHeaders.h
++++ b/node_modules/react-native-enriched-html/ios/interfaces/StyleHeaders.h
+@@ -21,6 +21,10 @@
+ @interface InlineCodeStyle : StyleBase
+ @end
+ 
++@interface HighlightStyle : StyleBase
++- (void)toggleWithColor:(NSString *)color range:(NSRange)range;
++@end
++
+ @interface LinkStyle : StyleBase
+ - (void)addLink:(LinkData *)linkData
+             range:(NSRange)range
+diff --git a/node_modules/react-native-enriched-html/ios/interfaces/StyleTypeEnum.h b/node_modules/react-native-enriched-html/ios/interfaces/StyleTypeEnum.h
+index 701d79e..e225d34 100644
+--- a/node_modules/react-native-enriched-html/ios/interfaces/StyleTypeEnum.h
++++ b/node_modules/react-native-enriched-html/ios/interfaces/StyleTypeEnum.h
+@@ -18,6 +18,7 @@ typedef NS_ENUM(NSInteger, StyleType) {
+   Link,
+   Mention,
+   Image,
++  Highlight,
+   InlineCode,
+   Bold,
+   Italic,
+diff --git a/node_modules/react-native-enriched-html/ios/styles/HighlightStyle.mm b/node_modules/react-native-enriched-html/ios/styles/HighlightStyle.mm
+new file mode 100644
+index 0000000..13efb83
+--- /dev/null
++++ b/node_modules/react-native-enriched-html/ios/styles/HighlightStyle.mm
+@@ -0,0 +1,104 @@
++#import "AttributeEntry.h"
++#import "EnrichedTextInputView.h"
++#import "RangeUtils.h"
++#import "StyleHeaders.h"
++
++// Apple Notes' highlight colors. The attribute value is the color's name, the
++// same string <mark data-color="..."> carries.
++@implementation HighlightStyle
++
+++ (StyleType)getType {
++  return Highlight;
++}
++
++- (NSString *)getKey {
++  return @"EnrichedHighlight";
++}
++
++- (BOOL)isParagraph {
++  return NO;
++}
++
+++ (UIColor *)colorForName:(NSString *)name {
++  UIColor *base = [name isEqualToString:@"pink"]     ? UIColor.systemPinkColor
++                  : [name isEqualToString:@"orange"] ? UIColor.systemOrangeColor
++                  : [name isEqualToString:@"mint"]   ? UIColor.systemMintColor
++                  : [name isEqualToString:@"blue"]   ? UIColor.systemBlueColor
++                                                     : UIColor.systemPurpleColor;
++  return [base colorWithAlphaComponent:0.3];
++}
++
++- (BOOL)styleCondition:(id)value range:(NSRange)range {
++  return [value isKindOfClass:NSString.class];
++}
++
++- (void)applyStyling:(NSRange)range {
++  NSTextStorage *storage = self.host.textView.textStorage;
++  [storage enumerateAttribute:[self getKey]
++                      inRange:range
++                      options:0
++                   usingBlock:^(id value, NSRange sub, BOOL *stop) {
++                     if (![value isKindOfClass:NSString.class])
++                       return;
++                     for (NSValue *v in [RangeUtils
++                              getNonNewlineRangesIn:self.host.textView
++                                              range:sub]) {
++                       [storage
++                           addAttribute:NSBackgroundColorAttributeName
++                                  value:[HighlightStyle colorForName:value]
++                                  range:v.rangeValue];
++                     }
++                   }];
++}
++
++- (void)reapplyFromStylePair:(StylePair *)pair {
++  [self add:pair.rangeValue.rangeValue
++           withValue:pair.styleValue
++          withTyping:NO
++      withDirtyRange:NO];
++}
++
++// Typing right after highlighted text continues its color.
++- (AttributeEntry *)getEntryIfPresent:(NSRange)range {
++  if (![self detect:range])
++    return nullptr;
++  NSTextStorage *storage = self.host.textView.textStorage;
++  BOOL caret = range.length == 0 &&
++               NSEqualRanges(self.host.textView.selectedRange, range);
++  id value = caret || range.location >= storage.length
++                 ? self.host.textView.typingAttributes[[self getKey]]
++                 : [storage attribute:[self getKey]
++                              atIndex:range.location
++                       effectiveRange:nil];
++  if (![value isKindOfClass:NSString.class])
++    return nullptr;
++  AttributeEntry *entry = [[AttributeEntry alloc] init];
++  entry.key = [self getKey];
++  entry.value = value;
++  return entry;
++}
++
++// Same color everywhere in the range removes it; otherwise the range takes it.
++- (void)toggleWithColor:(NSString *)color range:(NSRange)range {
++  if (range.length == 0) {
++    [self.host.textView.typingAttributes[[self getKey]] isEqual:color]
++        ? [self removeTyping]
++        : [self addTypingWithValue:color];
++    return;
++  }
++  __block BOOL same = YES;
++  [self.host.textView.textStorage
++      enumerateAttribute:[self getKey]
++                 inRange:range
++                 options:0
++              usingBlock:^(id value, NSRange sub, BOOL *stop) {
++                if (![value isEqual:color]) {
++                  same = NO;
++                  *stop = YES;
++                }
++              }];
++  same ? [self remove:range withDirtyRange:YES]
++       : [self add:range withValue:color withTyping:YES withDirtyRange:YES];
++}
++
++@end
+diff --git a/node_modules/react-native-enriched-html/ios/textHtmlParser/TextHtmlParser.mm b/node_modules/react-native-enriched-html/ios/textHtmlParser/TextHtmlParser.mm
+index 3899fd2..cf53b20 100644
+--- a/node_modules/react-native-enriched-html/ios/textHtmlParser/TextHtmlParser.mm
++++ b/node_modules/react-native-enriched-html/ios/textHtmlParser/TextHtmlParser.mm
+@@ -123,6 +123,11 @@ - (void)applyProcessedStyles:(NSArray *_Nonnull)processedStyles {
+           }
+         }
+       }
++    } else if ([styleType isEqualToNumber:@([HighlightStyle getType])]) {
++      [style add:styleRange
++               withValue:stylePair.styleValue
++              withTyping:NO
++          withDirtyRange:NO];
+     } else {
+       [style add:styleRange withTyping:NO withDirtyRange:NO];
+     }
+diff --git a/node_modules/react-native-enriched-html/ios/utils/StyleUtils.mm b/node_modules/react-native-enriched-html/ios/utils/StyleUtils.mm
+index 8382692..d0bbe49 100644
+--- a/node_modules/react-native-enriched-html/ios/utils/StyleUtils.mm
++++ b/node_modules/react-native-enriched-html/ios/utils/StyleUtils.mm
+@@ -8,8 +8,11 @@ + (NSDictionary *)conflictMap {
+     @([ItalicStyle getType]) : @[],
+     @([UnderlineStyle getType]) : @[],
+     @([StrikethroughStyle getType]) : @[],
+-    @([InlineCodeStyle getType]) :
+-        @[ @([LinkStyle getType]), @([MentionStyle getType]) ],
++    @([InlineCodeStyle getType]) : @[
++      @([LinkStyle getType]), @([MentionStyle getType]),
++      @([HighlightStyle getType])
++    ],
++    @([HighlightStyle getType]) : @[ @([InlineCodeStyle getType]) ],
+     @([LinkStyle getType]) :
+         @[ @([LinkStyle getType]), @([MentionStyle getType]) ],
+     @([MentionStyle getType]) : @[ @([LinkStyle getType]) ],
+@@ -88,7 +91,7 @@ + (NSDictionary *)conflictMap {
+       @([UnorderedListStyle getType]), @([OrderedListStyle getType]),
+       @([BlockQuoteStyle getType]), @([InlineCodeStyle getType]),
+       @([MentionStyle getType]), @([LinkStyle getType]),
+-      @([CheckboxListStyle getType])
++      @([CheckboxListStyle getType]), @([HighlightStyle getType])
+     ],
+     @([ImageStyle getType]) :
+         @[ @([LinkStyle getType]), @([MentionStyle getType]) ]
+@@ -103,6 +106,7 @@ + (NSDictionary *)blockingMap {
+     @([StrikethroughStyle getType]) : @[ @([CodeBlockStyle getType]) ],
+     @([InlineCodeStyle getType]) :
+         @[ @([CodeBlockStyle getType]), @([ImageStyle getType]) ],
++    @([HighlightStyle getType]) : @[ @([CodeBlockStyle getType]) ],
+     @([LinkStyle getType]) : @[
+       @([CodeBlockStyle getType]), @([ImageStyle getType]),
+       @([InlineCodeStyle getType])
+@@ -139,7 +143,8 @@ + (NSDictionary *)stylesDictForHost:(id<EnrichedViewHost>)host
+     [H6Style class],          [UnorderedListStyle class],
+     [OrderedListStyle class], [CheckboxListStyle class],
+     [AlignmentStyle class],   [BlockQuoteStyle class],
+-    [CodeBlockStyle class],   [ImageStyle class]
++    [CodeBlockStyle class],   [ImageStyle class],
++    [HighlightStyle class]
+   ];
+ 
+   NSArray<Class> *viewerClasses = @[
+@@ -162,7 +167,8 @@ + (NSDictionary *)stylesDictForHost:(id<EnrichedViewHost>)host
+     [EnrichedTextAlignmentStyle class],
+     [EnrichedTextBlockQuoteStyle class],
+     [EnrichedTextCodeBlockStyle class],
+-    [EnrichedTextImageStyle class]
++    [EnrichedTextImageStyle class],
++    [HighlightStyle class]
+   ];
+ 
+   NSMutableDictionary *dict = [NSMutableDictionary new];
+diff --git a/node_modules/react-native-enriched-html/lib/module/native/EnrichedTextInput.js b/node_modules/react-native-enriched-html/lib/module/native/EnrichedTextInput.js
+index cb357ee..bae26cc 100644
+--- a/node_modules/react-native-enriched-html/lib/module/native/EnrichedTextInput.js
++++ b/node_modules/react-native-enriched-html/lib/module/native/EnrichedTextInput.js
+@@ -141,6 +141,9 @@ export const EnrichedTextInput = ({
+     toggleStrikeThrough: () => {
+       Commands.toggleStrikeThrough(nullthrows(nativeRef.current));
+     },
++    toggleHighlight: color => {
++      Commands.toggleHighlight(nullthrows(nativeRef.current), color);
++    },
+     toggleInlineCode: () => {
+       Commands.toggleInlineCode(nullthrows(nativeRef.current));
+     },
+diff --git a/node_modules/react-native-enriched-html/lib/module/spec/EnrichedTextInputNativeComponent.ts b/node_modules/react-native-enriched-html/lib/module/spec/EnrichedTextInputNativeComponent.ts
+index 20e9d12..60d3c64 100644
+--- a/node_modules/react-native-enriched-html/lib/module/spec/EnrichedTextInputNativeComponent.ts
++++ b/node_modules/react-native-enriched-html/lib/module/spec/EnrichedTextInputNativeComponent.ts
+@@ -431,6 +431,10 @@ interface NativeCommands {
+   toggleItalic: (viewRef: React.ElementRef<ComponentType>) => void;
+   toggleUnderline: (viewRef: React.ElementRef<ComponentType>) => void;
+   toggleStrikeThrough: (viewRef: React.ElementRef<ComponentType>) => void;
++  toggleHighlight: (
++    viewRef: React.ElementRef<ComponentType>,
++    color: string
++  ) => void;
+   toggleInlineCode: (viewRef: React.ElementRef<ComponentType>) => void;
+   toggleH1: (viewRef: React.ElementRef<ComponentType>) => void;
+   toggleH2: (viewRef: React.ElementRef<ComponentType>) => void;
+@@ -497,6 +501,7 @@ export const Commands: NativeCommands = codegenNativeCommands<NativeCommands>({
+     'toggleItalic',
+     'toggleUnderline',
+     'toggleStrikeThrough',
++    'toggleHighlight',
+     'toggleInlineCode',
+     'toggleH1',
+     'toggleH2',
+diff --git a/node_modules/react-native-enriched-html/lib/typescript/src/types.d.ts b/node_modules/react-native-enriched-html/lib/typescript/src/types.d.ts
+index 9b433e4..4565d8a 100644
+--- a/node_modules/react-native-enriched-html/lib/typescript/src/types.d.ts
++++ b/node_modules/react-native-enriched-html/lib/typescript/src/types.d.ts
+@@ -397,6 +397,8 @@ export interface EnrichedTextInputInstance extends NativeMethods {
+     toggleUnderline: () => void;
+     /** Toggles strikethrough on the current selection (or toggles it for future typing if nothing is selected). */
+     toggleStrikeThrough: () => void;
++    /** Toggles a highlight color (purple, pink, orange, mint, blue) on the selection or for typing. */
++    toggleHighlight: (color: string) => void;
+     /** Toggles inline code on the current selection (or toggles it for future typing if nothing is selected). */
+     toggleInlineCode: () => void;
+     /** Toggles an H1 heading for the paragraph(s) at the current selection. */

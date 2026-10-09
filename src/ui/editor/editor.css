@@ -1,0 +1,454 @@
+/* Apple Notes in a WebView: SF type sizes from NoteTheme (NoteRendering.swift), system colors for both appearances. */
+
+:root {
+  color-scheme: light dark;
+  --label: #000;
+  --secondary: rgba(60, 60, 67, 0.6);
+  --tertiary: rgba(60, 60, 67, 0.3);
+  --separator: rgba(60, 60, 67, 0.29);
+  --background: #fff;
+  --fill: rgba(118, 118, 128, 0.12);
+  --tint: #e5a00d;
+  --check: #e5a00d;
+  --hl-purple: rgba(175, 82, 222, 0.22);
+  --hl-purple-text: #6c3389;
+  --hl-pink: rgba(255, 45, 85, 0.22);
+  --hl-pink-text: #9e1c35;
+  --hl-orange: rgba(255, 149, 0, 0.22);
+  --hl-orange-text: #9e5c00;
+  --hl-mint: rgba(0, 199, 190, 0.22);
+  --hl-mint-text: #007b76;
+  --hl-blue: rgba(0, 122, 255, 0.22);
+  --hl-blue-text: #004c9e;
+  --paper-spacing: 0px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-scheme='light']) {
+    --label: #fff;
+    --secondary: rgba(235, 235, 245, 0.6);
+    --tertiary: rgba(235, 235, 245, 0.3);
+    --separator: rgba(84, 84, 88, 0.6);
+    --background: #000;
+    --fill: rgba(118, 118, 128, 0.24);
+    --tint: #ffd60a;
+    --check: #ffd60a;
+    --hl-purple: rgba(191, 90, 242, 0.22);
+    --hl-purple-text: #dfadf9;
+    --hl-pink: rgba(255, 55, 95, 0.22);
+    --hl-pink-text: #ff9baf;
+    --hl-orange: rgba(255, 159, 10, 0.22);
+    --hl-orange-text: #ffcf85;
+    --hl-mint: rgba(99, 230, 226, 0.22);
+    --hl-mint-text: #b1f2f0;
+    --hl-blue: rgba(10, 132, 255, 0.22);
+    --hl-blue-text: #85c2ff;
+  }
+}
+
+:root[data-scheme='dark'] {
+  color-scheme: dark;
+  --label: #fff;
+  --secondary: rgba(235, 235, 245, 0.6);
+  --tertiary: rgba(235, 235, 245, 0.3);
+  --separator: rgba(84, 84, 88, 0.6);
+  --background: #000;
+  --fill: rgba(118, 118, 128, 0.24);
+  --tint: #ffd60a;
+  --check: #ffd60a;
+  --hl-purple: rgba(191, 90, 242, 0.22);
+  --hl-purple-text: #dfadf9;
+  --hl-pink: rgba(255, 55, 95, 0.22);
+  --hl-pink-text: #ff9baf;
+  --hl-orange: rgba(255, 159, 10, 0.22);
+  --hl-orange-text: #ffcf85;
+  --hl-mint: rgba(99, 230, 226, 0.22);
+  --hl-mint-text: #b1f2f0;
+  --hl-blue: rgba(10, 132, 255, 0.22);
+  --hl-blue-text: #85c2ff;
+}
+
+:root[data-scheme='light'] {
+  color-scheme: light;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--background);
+  color: var(--label);
+  font: -apple-system-body;
+  font-family: -apple-system, system-ui, sans-serif;
+  font-size: 17px;
+  line-height: 1.3;
+  -webkit-text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+  overflow-wrap: break-word;
+}
+
+/* The whole page scrolls; paper lines scroll with the text. */
+.page {
+  min-height: 100vh;
+  box-sizing: border-box;
+  padding: 8px 20px 45vh;
+}
+
+:root[data-paper='linesSmall'] .page,
+:root[data-paper='gridSmall'] .page {
+  --paper-spacing: 24px;
+}
+
+:root[data-paper='linesLarge'] .page,
+:root[data-paper='gridLarge'] .page {
+  --paper-spacing: 36px;
+}
+
+:root[data-paper^='lines'] .page {
+  background-image: linear-gradient(to bottom, transparent calc(var(--paper-spacing) - 0.5px), var(--separator) calc(var(--paper-spacing) - 0.5px));
+  background-size: 100% var(--paper-spacing);
+  background-position: 0 40px;
+}
+
+:root[data-paper^='grid'] .page {
+  background-image:
+    linear-gradient(to bottom, transparent calc(var(--paper-spacing) - 0.5px), var(--separator) calc(var(--paper-spacing) - 0.5px)),
+    linear-gradient(to right, transparent calc(var(--paper-spacing) - 0.5px), var(--separator) calc(var(--paper-spacing) - 0.5px));
+  background-size: var(--paper-spacing) var(--paper-spacing);
+  background-position: 0 40px;
+}
+
+.date {
+  margin: 0 0 14px;
+  text-align: center;
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--secondary);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.ProseMirror {
+  outline: none;
+  caret-color: var(--tint);
+  white-space: pre-wrap;
+}
+
+.ProseMirror > * + * {
+  margin-top: 3px;
+}
+
+.ProseMirror p {
+  margin: 0;
+  min-height: 1.3em;
+}
+
+/* Title, Heading, Subheading. */
+.ProseMirror h1,
+.ProseMirror h2,
+.ProseMirror h3 {
+  position: relative;
+  margin: 0;
+  line-height: 1.2;
+}
+
+.ProseMirror h1 {
+  font-size: 28px;
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+
+.ProseMirror h2 {
+  font-size: 22px;
+  font-weight: 700;
+  margin-top: 4px;
+}
+
+.ProseMirror h3 {
+  font-size: 18px;
+  font-weight: 600;
+  margin-top: 4px;
+}
+
+/* Monostyled. */
+.ProseMirror pre {
+  margin: 4px 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--fill);
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-size: 15px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+}
+
+.ProseMirror pre code {
+  font: inherit;
+  background: none;
+  padding: 0;
+}
+
+.ProseMirror code {
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-size: 0.9em;
+  background: var(--fill);
+  border-radius: 4px;
+  padding: 0 2px;
+}
+
+.ProseMirror blockquote {
+  margin: 0;
+  padding-left: 13px;
+  border-left: 3px solid var(--tertiary);
+}
+
+.ProseMirror a {
+  color: var(--tint);
+  text-decoration: underline;
+}
+
+.ProseMirror a[href^='puffer://note/'] {
+  text-decoration: none;
+  border-bottom: 1px solid var(--tint);
+}
+
+.ProseMirror .hashtag {
+  color: var(--tint);
+}
+
+.ProseMirror mark {
+  border-radius: 3px;
+  padding: 0 1px;
+  background: var(--hl-purple);
+  color: var(--hl-purple-text);
+}
+
+.ProseMirror mark[data-color='pink'] { background: var(--hl-pink); color: var(--hl-pink-text); }
+.ProseMirror mark[data-color='orange'] { background: var(--hl-orange); color: var(--hl-orange-text); }
+.ProseMirror mark[data-color='mint'] { background: var(--hl-mint); color: var(--hl-mint-text); }
+.ProseMirror mark[data-color='blue'] { background: var(--hl-blue); color: var(--hl-blue-text); }
+
+/* Lists: bullets, dashes, numbers, Apple Notes' checklist circles. */
+.ProseMirror ul,
+.ProseMirror ol {
+  margin: 0;
+  padding-left: 24px;
+}
+
+.ProseMirror li > p {
+  margin: 0;
+}
+
+.ProseMirror li + li {
+  margin-top: 3px;
+}
+
+.ProseMirror ul[data-dashed] {
+  list-style: none;
+}
+
+.ProseMirror ul[data-dashed] > li {
+  position: relative;
+}
+
+.ProseMirror ul[data-dashed] > li::before {
+  content: '–';
+  position: absolute;
+  left: -18px;
+}
+
+.ProseMirror ul[data-type='taskList'] {
+  list-style: none;
+  padding-left: 0;
+}
+
+.ProseMirror ul[data-type='taskList'] ul[data-type='taskList'] {
+  padding-left: 0;
+}
+
+.ProseMirror ul[data-type='taskList'] > li {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+/* The circle is the label; the real checkbox lies invisible on top of it, so a tap toggles it. */
+.ProseMirror ul[data-type='taskList'] > li > label {
+  flex: none;
+  position: relative;
+  width: 24px;
+  height: 22px;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.ProseMirror ul[data-type='taskList'] > li > label::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 1px;
+  width: 21px;
+  height: 21px;
+  box-sizing: border-box;
+  border-radius: 50%;
+  border: 1.5px solid var(--tertiary);
+}
+
+.ProseMirror ul[data-type='taskList'] > li[data-checked='true'] > label::before {
+  border-color: var(--check);
+  background: var(--check)
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Cpath d='M5.5 10.5l3 3 6-7' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")
+    center / 18px no-repeat;
+}
+
+.ProseMirror ul[data-type='taskList'] > li > label > input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+}
+
+.ProseMirror ul[data-type='taskList'] > li > div {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Tables. */
+.ProseMirror .tableWrapper {
+  overflow-x: auto;
+  margin: 6px 0;
+}
+
+.ProseMirror table {
+  border-collapse: collapse;
+  min-width: 100%;
+  table-layout: fixed;
+}
+
+.ProseMirror td,
+.ProseMirror th {
+  border: 1px solid var(--separator);
+  padding: 6px 8px;
+  vertical-align: top;
+  text-align: left;
+  min-width: 64px;
+}
+
+.ProseMirror th {
+  font-weight: 600;
+}
+
+.ProseMirror .selectedCell {
+  background: var(--fill);
+}
+
+/* Attachments: a picture at full width, or a card for a PDF or file. */
+.ProseMirror .attachment {
+  display: block;
+  margin: 4px 0;
+  cursor: pointer;
+}
+
+.ProseMirror .attachment-image img {
+  display: block;
+  max-width: 100%;
+  border-radius: 10px;
+}
+
+.ProseMirror .attachment-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 76px;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 0.5px solid var(--separator);
+  background: var(--fill);
+}
+
+.ProseMirror .attachment-icon {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 56px;
+  color: var(--secondary);
+}
+
+.ProseMirror .attachment-icon img {
+  max-width: 42px;
+  max-height: 56px;
+  border: 0.5px solid var(--separator);
+}
+
+.ProseMirror .attachment-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.ProseMirror .attachment-title {
+  font-size: 16px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ProseMirror .attachment-subtitle {
+  font-size: 13px;
+  color: var(--secondary);
+}
+
+.ProseMirror .attachment.selected {
+  outline: 3px solid var(--tint);
+  outline-offset: 1px;
+  border-radius: 12px;
+}
+
+/* Collapsible sections. */
+.ProseMirror .fold-toggle {
+  position: absolute;
+  left: -18px;
+  top: 50%;
+  margin-top: -9px;
+  width: 16px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--tertiary);
+  transform: rotate(90deg);
+  transition: transform 0.15s ease;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.ProseMirror .fold-toggle.folded {
+  transform: none;
+  color: var(--tint);
+}
+
+.ProseMirror .folded-away {
+  display: none;
+}
+
+.ProseMirror .selection {
+  background: rgba(229, 160, 13, 0.3);
+}
+
+.ProseMirror h1.is-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  pointer-events: none;
+  color: var(--tertiary);
+}
+
+.ProseMirror-gapcursor:after {
+  border-top-color: var(--label);
+}

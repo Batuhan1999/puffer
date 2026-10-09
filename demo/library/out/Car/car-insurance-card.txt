@@ -1,0 +1,10 @@
+Motor insurance card
+
+Northwind Mutual Insurance, motor policy NWM-MO-30917.
+Vehicle: Velora Hatch 1.4, registration HB-482-KT.
+Cover: third party and partial cover, deductible 300.00 EUR.
+Premium: 540.00 EUR per year, renews on 1 January.
+
+Roadside assistance, 24 hours: 0800 555 0150.
+After an accident: photograph both cars, note the other driver's registration and insurer,
+call the claims line 0800 555 0199 within 7 days.

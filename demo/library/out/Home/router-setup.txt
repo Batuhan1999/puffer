@@ -1,0 +1,12 @@
+Fibrelink Home router FX-3000, setup notes
+
+Installed on 3 May 2025 by Fibrelink. Customer number FL-7730215. Plan: Fibre 500 (500/100 Mbit/s).
+
+Admin page: http://192.168.1.1 (admin password is on the sticker under the router).
+Main Wi-Fi: LindenRow-3B, 2.4 GHz and 5 GHz combined. Password on the sticker.
+Guest Wi-Fi: LindenRow-Guest, enabled, isolated from the main network.
+
+If the internet light is red: restart the router, wait 3 minutes. If it stays red, check the fibre cable
+in the wall box. Support line 0800 555 0123, open 8:00 to 22:00.
+
+Firmware updates install automatically at 3:00.

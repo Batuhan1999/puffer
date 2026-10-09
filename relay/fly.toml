@@ -1,0 +1,39 @@
+# One always-on machine: the mailbox, change pages and subscriptions live in its memory, and long-polls stay
+# open up to 50 s. Create the volume once (`fly volumes create puffer_state --size 1`), then `fly deploy --ha=false`.
+app = "puffer"
+primary_region = "fra"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PUFFER_PUBLIC_URL = "https://puffer.fly.dev"
+  # Fly's proxy sets Fly-Client-IP; per-caller rate limits key on it.
+  PUFFER_TRUST_PROXY = "fly"
+
+[[mounts]]
+  source = "puffer_state"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = false
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 200
+    hard_limit = 250
+
+  [[http_service.checks]]
+    method = "GET"
+    path = "/healthz"
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "10s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

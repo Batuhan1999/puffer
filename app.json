@@ -1,25 +1,33 @@
 {
   "expo": {
-    "name": "prototype",
+    "name": "Puffer",
     "slug": "prototype",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "automatic",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": false,
+      "bundleIdentifier": "dev.local.puffer",
+      "appleTeamId": "6Z8WY4U8PP"
     },
-    "android": {
-      "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/android-icon-foreground.png",
-        "backgroundImage": "./assets/android-icon-background.png",
-        "monochromeImage": "./assets/android-icon-monochrome.png"
-      },
-      "predictiveBackGestureEnabled": false
-    },
-    "web": {
-      "favicon": "./assets/favicon.png"
-    }
+    "plugins": [
+      "expo-sqlite",
+      "expo-font",
+      "expo-router",
+      [
+        "expo-build-properties",
+        {
+          "ios": {
+            "deploymentTarget": "18.0"
+          }
+        }
+      ],
+      "./modules/puffer-native/app.plugin.js"
+    ],
+    "scheme": "puffer",
+    "platforms": [
+      "ios"
+    ]
   }
 }

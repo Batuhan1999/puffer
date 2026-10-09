@@ -1,0 +1,74 @@
+[
+  {
+    "title": "Lisbon packing list",
+    "created": "2026-09-02T20:10:00Z",
+    "modified": "2026-10-05T19:42:00Z",
+    "text": "Lisbon packing list\nFlight SW 1432 on Sat 14 Nov at 07:40, booking K7QM2P. Leave home at 05:45.\nOne checked bag up to 23 kg plus the cabin bag, so the big suitcase is fine.\n- ID card and passport (passport valid until March 2027)\n- Phone charger, power bank, EU plug adapter not needed\n- Rain jacket, light sweater, comfortable shoes for the hills\n- Swimwear for Cascais\n- Printed hotel confirmation HZ-90417\nStill to buy: travel-size sunscreen, a small day backpack.\n"
+  },
+  {
+    "title": "Fieldnote 2.3 follow-ups",
+    "created": "2026-09-30T15:40:00Z",
+    "modified": "2026-10-01T08:15:00Z",
+    "text": "Fieldnote 2.3 follow-ups after the Q4 planning meeting\nMy part: book usability sessions with 6 participants for the week of 12 October, before the beta on 23 October.\nDraft the session script by 9 October (design freeze day).\nAsk Priya whether the 24,000 EUR research budget covers participant vouchers (6 x 50 EUR).\nRemind Tom that the release notes draft is due 2 November, three days before the release candidate.\n"
+  },
+  {
+    "title": "Car service reminder",
+    "created": "2026-09-20T09:00:00Z",
+    "modified": "2026-10-04T18:20:00Z",
+    "text": "Car service reminder\nOdometer on 4 October: 68,950 km. Next service is due at 76,000 km or March 2027.\nBook the winter tire change at Riverside Auto for early November, ticket TS-1187.\nAsk them to check the front brake pads then (40 percent at the March service).\n"
+  },
+  {
+    "title": "Guest Wi-Fi",
+    "created": "2026-05-10T12:00:00Z",
+    "modified": "2026-05-10T12:05:00Z",
+    "text": "Guest Wi-Fi\nNetwork: LindenRow-Guest\nPassword: harbor-lantern-58\nIsolated from the main network. Change it after the summer visitors leave.\n"
+  },
+  {
+    "title": "Gift ideas",
+    "created": "2026-08-15T21:30:00Z",
+    "modified": "2026-09-28T20:05:00Z",
+    "text": "Gift ideas\nSam, birthday 2 December: ceramic pour-over coffee set, or a voucher for the bookshop on Quay Street.\nJo, housewarming in October: a good olive oil from Lisbon? Too late, the trip is in November. A plant instead.\nParents, anniversary in January: weekend in Port Ellis, Seaglass Lodge was lovely.\n"
+  },
+  {
+    "title": "Books to read",
+    "created": "2026-06-01T19:00:00Z",
+    "modified": "2026-09-12T22:10:00Z",
+    "text": "Books to read\n- The Left Hand of Darkness, Ursula K. Le Guin\n- Piranesi, Susanna Clarke\n- The Book of Disquiet, Fernando Pessoa (for Lisbon)\n- Thinking in Systems, Donella Meadows\nFinished this year: Project Hail Mary, The Remains of the Day.\n"
+  },
+  {
+    "title": "Shopping list",
+    "created": "2026-10-06T17:00:00Z",
+    "modified": "2026-10-07T18:30:00Z",
+    "text": "Shopping list\n- 3 bananas, let them get very ripe for banana bread\n- 2 cans chickpeas, coconut milk, fresh spinach, coriander, a lime (curry on Thursday)\n- Kettleby descaler, the orange light is blinking\n- Rye flour for the starter\n- Dishwasher tabs\n"
+  },
+  {
+    "title": "Offline mode (first sketch)",
+    "created": "2026-09-08T08:30:00Z",
+    "modified": "2026-09-08T09:05:00Z",
+    "text": "Offline mode (first sketch)\nIdea for Fieldnote: everything works on the plane, edits queue up locally and sync when the network is back.\nShow a small cloud icon with a count of unsynced notes. No modal errors when offline.\nQuestion for Tom: can the sync engine keep a per-field change log?\n"
+  },
+  {
+    "title": "Offline mode (conflict cases)",
+    "created": "2026-09-19T16:10:00Z",
+    "modified": "2026-09-19T16:45:00Z",
+    "text": "Offline mode (conflict cases)\nSame note edited on phone and laptop while both offline: merge per field, title and body separately.\nSame paragraph edited twice: keep both versions and mark the note \"needs review\".\nNote deleted on one device, edited on the other: the edit wins, deletion is undone.\n"
+  },
+  {
+    "title": "Offline mode (battery test)",
+    "created": "2026-09-29T11:00:00Z",
+    "modified": "2026-09-29T11:20:00Z",
+    "text": "Offline mode (battery test)\nDevice lab result: background sync every 5 minutes costs about 4 percent battery per day.\nBatching uploads to every 15 minutes brings it under 1.5 percent. Go with 15 minutes, sync immediately on open.\n"
+  },
+  {
+    "title": "Offline mode (usability takeaways)",
+    "created": "2026-10-07T17:30:00Z",
+    "modified": "2026-10-07T18:05:00Z",
+    "text": "Offline mode (usability takeaways)\nPilot session before the real ones next week. People did not notice the cloud icon at all.\nBetter: a one-line banner \"Offline, 3 notes will sync later\" that disappears when synced.\nEveryone expected the conflict \"needs review\" badge in the note list, not only inside the note.\nBring both changes to the design freeze on 9 October.\n"
+  },
+  {
+    "title": "Health to-dos",
+    "created": "2026-09-24T13:20:00Z",
+    "modified": "2026-10-02T07:50:00Z",
+    "text": "Health to-dos\n- Dentist on Thu 29 Oct at 08:45, Bright Smile Dental. Cancel 24 h before if needed.\n- Flu shot: last one was 21 Oct 2025, book for late October at the family practice.\n- Use the one cetirizine refill before 2 December.\n- Gym: pause is possible for 3 months with a doctor's note, not needed now.\n"
+  }
+]
