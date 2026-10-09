@@ -85,8 +85,24 @@ enum NoteText {
     var text = line.trimmingCharacters(in: .whitespaces)
     if let mark = marks.first(where: text.hasPrefix) { text = String(text.dropFirst(mark.count)) }
     text = String(text.drop { $0 == "#" || $0 == ">" }).trimmingCharacters(in: .whitespaces)
-    return text.replacingOccurrences(of: "**", with: "").replacingOccurrences(of: "~~", with: "")
+    // Unverified (cloud): validate on the Mac. The note's inline Markdown and its <u>/<mark> tags, as words only.
+    for (pattern, template) in inlineMarkup {
+      text = pattern.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: template)
+    }
+    return text.trimmingCharacters(in: .whitespaces)
   }
+
+  /// In order: attachments go, links keep their text, tags and paired marks go, then lone `*`/`_` emphasis and code.
+  private static let inlineMarkup: [(NSRegularExpression, String)] = [
+    ("!\\[[^\\]]*\\]\\([^)]*\\)", ""),
+    ("\\[([^\\]]*)\\]\\([^)]*\\)", "$1"),
+    ("</?u>|<mark[^>]*>|</mark>", ""),
+    ("\\*\\*|~~|==", ""),
+    ("(?<![\\p{L}\\p{N}\\\\*])\\*(?=\\S)(.+?)(?<=\\S)\\*(?![\\p{L}\\p{N}*])", "$1"),
+    ("(?<![\\p{L}\\p{N}\\\\_])_(?=\\S)(.+?)(?<=\\S)_(?![\\p{L}\\p{N}_])", "$1"),
+    ("`", ""),
+    ("\\s{2,}", " "),
+  ].map { (try! NSRegularExpression(pattern: $0.0), $0.1) }
 
   /// `![alt](path)`: images are not imported, and the note says so where each one was.
   static func withoutImages(_ markdown: String) -> (text: String, images: Int) {
@@ -151,6 +167,20 @@ actor NoteBook {
       notes[note.id] = nil
     }
     LegacyNotes.migrate(into: self)
+    removeOrphanedAttachments()
+  }
+
+  /// Unverified (cloud): validate on the Mac. A purged note's files go with it; the sweep also clears folders left by
+  /// purges from before this, and by notes closed empty.
+  private func removeAttachments(of id: NoteID) {
+    try? FileManager.default.removeItem(at: AttachmentStore(noteID: id.rawValue).folder)
+  }
+
+  private func removeOrphanedAttachments() {
+    let folders = (try? FileManager.default.contentsOfDirectory(at: AttachmentStore.root, includingPropertiesForKeys: nil)) ?? []
+    for folder in folders where notes[NoteID(rawValue: folder.lastPathComponent)] == nil {
+      try? FileManager.default.removeItem(at: folder)
+    }
   }
 
   // MARK: reads
@@ -271,6 +301,7 @@ actor NoteBook {
     for id in ids where notes[id]?.deletedAt != nil {
       try tables?.notes.delete(id.rawValue)
       notes[id] = nil
+      removeAttachments(of: id)
     }
     changed(nil)
   }

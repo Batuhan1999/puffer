@@ -74,6 +74,11 @@ check(show(doc[1].inlines.map((i) => [i.text, i.style.marks, i.style.highlight ?
 check(show(doc[9].inlines) === show([{ attachment: { name: 'Photo', file: 'ab12cd34.jpg' } }]), 'attachment');
 check(md.parse('plain words', false)[0].block.style === 'body', 'fragment keeps body');
 check(md.normalize('') === '', 'empty note stays empty');
+// A first line set to Body stays Body: an empty line before it, which the parser takes back out.
+const bodyFirst = md.serialize([{ block: { kind: 'text', style: 'body', quoted: false }, inlines: [{ text: 'not a title', style: { marks: 0 } }] }]);
+check(bodyFirst === '\nnot a title' && md.parse(bodyFirst)[0].block.style === 'body' && md.parse(bodyFirst).length === 1, 'body first line', show(bodyFirst));
+check(md.normalize('just text') === '# just text', 'implicit title');
+check(md.normalize('\n\nafter blank') === '\n\nafter blank', 'leading blank keeps body');
 check(show(md.parse('[Groceries](puffer://note/abc)')[0].inlines) === show([{ text: 'Groceries', style: { marks: 0, link: 'puffer://note/abc' } }]), 'note link');
 
 const list = md.parse('# L\n- [x] a\n- [ ] b\n- [x] c\n- [ ] d\ntext\n- [x] e\n- [ ] f');

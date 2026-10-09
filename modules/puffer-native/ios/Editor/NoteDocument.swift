@@ -313,9 +313,15 @@ enum NoteMarkdown {
       paragraphs.append(parseLine(line, listColumns: &listColumns))
       i += 1
     }
-    let first = paragraphs.firstIndex { !$0.inlines.isEmpty } ?? 0
-    if implicitTitle, paragraphs.indices.contains(first), paragraphs[first].block == .body {
-      paragraphs[first].block = .text(.title, quoted: false)
+    let first = firstWithText(paragraphs)
+    if implicitTitle, paragraphs.indices.contains(first), isPlainBody(paragraphs[first]) {
+      // Unverified (cloud): validate on the Mac. A leading empty line keeps the first text as Body (serialize writes it
+      // for a note whose first line was set to Body); same rule as src/ui/editor/markdown.ts.
+      if first > 0, paragraphs[0].inlines.isEmpty {
+        paragraphs.removeFirst()
+      } else {
+        paragraphs[first].block = .text(.title, quoted: false)
+      }
     }
     return NoteDocument(paragraphs: paragraphs)
   }
@@ -654,7 +660,19 @@ enum NoteMarkdown {
       }
       index += 1
     }
+    // The first text is Body, not the title: one empty line first, which parse takes back out.
+    if paragraphs.indices.contains(firstWithText(paragraphs)), isPlainBody(paragraphs[firstWithText(paragraphs)]) {
+      lines.insert("", at: 0)
+    }
     return lines.joined(separator: "\n")
+  }
+
+  private static func firstWithText(_ paragraphs: [NoteParagraph]) -> Int {
+    paragraphs.firstIndex { !$0.inlines.isEmpty } ?? 0
+  }
+
+  private static func isPlainBody(_ paragraph: NoteParagraph) -> Bool {
+    paragraph.block == .body && !paragraph.inlines.isEmpty
   }
 
   private static func cellsOf(_ inlines: [NoteInline]) -> [String] {

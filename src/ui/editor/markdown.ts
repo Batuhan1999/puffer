@@ -77,14 +77,17 @@ export function parse(markdown: string, implicitTitle = true): Paragraph[] {
     paragraphs.push(parseLine(line, listColumns));
     i += 1;
   }
-  const found = paragraphs.findIndex((p) => p.inlines.length > 0);
-  const first = found === -1 ? 0 : found;
-  const head = paragraphs[first];
-  if (implicitTitle && head && head.block.kind === 'text' && head.block.style === 'body' && !head.block.quoted) {
-    head.block = { kind: 'text', style: 'title', quoted: false };
+  const head = paragraphs[firstWithText(paragraphs)];
+  if (implicitTitle && head && isPlainBody(head)) {
+    // A leading empty line keeps the first text as Body (serialize writes it for a note whose first line was set to Body).
+    if (paragraphs.length > 1 && paragraphs[0] !== head && paragraphs[0].inlines.length === 0) paragraphs.shift();
+    else head.block = { kind: 'text', style: 'title', quoted: false };
   }
   return paragraphs;
 }
+
+const firstWithText = (paragraphs: Paragraph[]) => Math.max(0, paragraphs.findIndex((p) => p.inlines.length > 0));
+const isPlainBody = (p: Paragraph) => p.block.kind === 'text' && p.block.style === 'body' && !p.block.quoted && p.inlines.length > 0;
 
 function parseLine(line: string, listColumns: number[]): Paragraph {
   let rest = line;
@@ -418,6 +421,9 @@ export function serialize(paragraphs: Paragraph[]): string {
     }
     index += 1;
   }
+  // The first text is Body, not the title: one empty line first, which parse takes back out.
+  const head = paragraphs[firstWithText(paragraphs)];
+  if (head && isPlainBody(head)) lines.unshift('');
   return lines.join('\n');
 }
 

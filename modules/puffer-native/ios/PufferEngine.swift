@@ -987,6 +987,7 @@ actor Embedder {
 
   func embedTexts(_ texts: [String], lane: Lane = .indexing) async throws -> [[Float]] {
     let engine = try loaded()
+    if lane == .indexing { try await untilForegroundOnGPU() }
     await turn(lane)
     defer { endTurn() }
     do {
@@ -1018,6 +1019,20 @@ actor Embedder {
       busy = false
     } else {
       waiting.removeFirst().resume.resume()
+    }
+  }
+
+  /// Unverified (cloud): validate on the Mac. iOS refuses GPU work from a background app, so indexing on the GPU
+  /// waits for the foreground, checked between batches; cancelling the indexing task (Sources.stop) ends the wait.
+  /// Queries still run: a Shortcut answers or fails, it never hangs. The overnight index task runs in the background,
+  /// so with the model on the GPU it waits out its time: it needs a CPU engine of its own to make progress.
+  private func untilForegroundOnGPU() async throws {
+    guard backend == Backend.gpu.rawValue else { return }
+    var logged = false
+    while await AppPresence.inBackground {
+      if !logged { pufferLog.notice("indexing paused: app in background, model on the GPU") }
+      logged = true
+      try await Task.sleep(for: .seconds(5))
     }
   }
 
