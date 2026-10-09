@@ -1,6 +1,6 @@
 # Testing Puffer with real agents
 
-The relay runs at `https://puffer.fly.dev` (one machine in Frankfurt). Puffer in the iPhone simulator is paired with it. Your documents and photos never leave the simulator unless Puffer shares them for a request.
+The relay runs at `https://puffer.fly.dev` (one machine in Frankfurt). Puffer in the iPhone simulator is paired with it. Your notes and documents never leave the simulator unless Puffer shares them to answer an agent's request.
 
 Keep the simulator running with Puffer open while you test. When Puffer is closed, agents get "phone offline" plus a link, and their question waits until Puffer opens again.
 
@@ -11,13 +11,13 @@ claude mcp add --transport http puffer https://puffer.fly.dev/mcp
 ```
 
 1. In a Claude Code session, type `/mcp`, pick `puffer` and sign in. A browser page opens with a QR code.
-2. Scan the QR code with your iPhone's camera and open the link. Puffer shows "Claude Code wants to connect". Choose what it may read without asking (Ask Every Time is the default), and tap Approve. With the simulator, open the page's Open in Puffer link in the simulator's Safari instead, or open the QR code's URL there.
-3. Ask Claude Code something the demo library knows, for example:
+2. Scan the QR code with your iPhone's camera and open the link. Puffer shows "Claude Code wants to connect". Tap Approve. This is the only approval: a connected agent's requests are answered without asking again. With the simulator, open the page's Open in Puffer link in the simulator's Safari instead, or open the QR code's URL there.
+3. Ask Claude Code something your notes know, for example:
    - "Use Puffer: when is the vet appointment?"
    - "Ask Puffer what deposit I paid for the apartment."
    - "What changed in my Puffer library recently?"
    - "Ask Puffer for chess openings." This one should come back with nothing found.
-4. With Ask Every Time, each question shows up in Puffer for review. Switch the agent to Everything in Agents to see automatic answers.
+4. Try the note tools: "Create a note in Puffer called Packing list", then "Append a passport reminder to it", then "Delete it". Each change shows up in the Notes tab, and the History of the agent (Agents, the agent) lists every request.
 
 Claude Code shows up as "not verified" when it connects, because its sign-in returns to your own computer. That is expected.
 
@@ -31,12 +31,9 @@ Easiest: send the agent this one line. It contains no key.
 Connect to my Puffer: https://puffer.fly.dev/start
 ```
 
-The agent reads the instructions there, asks the relay for access and texts you an approval link. Tap it on the iPhone, choose the access level and approve. The agent then collects its own key. In Puffer, Agents shows the same line under "Connect by Message" with Copy and Share buttons.
+The agent reads the instructions there, asks the relay for access and texts you an approval link. Tap it on the iPhone and approve. The agent then collects its own key. In Puffer, Agents shows the same message under "Connect by Message" with Copy Message and Share buttons.
 
-Fallback, connecting with a key yourself:
-
-1. In Puffer, open Agents, use "Connect with a Key", give it a name, then tap Copy Key. The screen also shows the HTTP address and the OpenAPI link.
-2. Use the key:
+The agent finishes with an `ak_` key and calls the API with it. If you already have a key, for example from an earlier connection:
 
 ```bash
 export PUFFER_KEY='paste the ak_ key here'
@@ -58,14 +55,20 @@ Add a custom MCP connector (developer mode) with the URL `https://puffer.fly.dev
 
 ## 4. Apple Notes through Shortcuts
 
-Puffer cannot read Notes directly. A Shortcut hands your notes to Puffer, which keeps them in its own folder and shows them in Library under the source "Apple Notes". Agents can ask for that source by name.
+Puffer cannot read Notes directly. A Shortcut hands your notes to Puffer, which turns them into Puffer notes (default folder "Imported", source "Apple Notes"). Agents can search and read them like any other note. The in-app guide is Notes, then Import from Apple Notes.
 
-Build the shortcut on the iPhone:
+After installing a new build, re-add the action in your existing Shortcut, so it matches the new build's action:
 
-1. In Shortcuts, tap New Shortcut.
-2. Add Find Notes and leave it on All Notes.
-3. Add Sync Notes to Puffer. Shortcuts passes the found notes in as text files.
-4. Run it once. Puffer reports how many notes it added, updated and removed.
+1. In Shortcuts, open your Apple Notes sync shortcut (or tap New Shortcut).
+2. Keep Find Notes on All Notes, with no filter and Limit off.
+3. Remove the old Puffer action if there is one and add **Sync Notes to Puffer** again after Find Notes. The action accepts files, text and rich text, so it takes the found notes on its own. Optional: Show More, then a Folder name.
+4. Run it. Puffer can stay closed. It reports how many notes it added, updated and skipped.
+
+Check that:
+
+- Headings, bold, italic, lists, checklists and links keep their formatting, and the notes appear in the Imported folder.
+- Running it again adds nothing new. A note you edited or deleted in Puffer stays as it is. A note you changed only in Notes is updated.
+- An agent finds an imported note ("Search my Puffer notes for ...").
 
 Keep it current with an automation:
 
@@ -73,25 +76,40 @@ Keep it current with an automation:
 2. Choose Daily and Run Immediately.
 3. As the action, use Find Notes (All Notes) and then Sync Notes to Puffer.
 
-Each run saves new and changed notes and removes notes that you deleted in Notes. Unchanged notes cost nothing. To add notes without removing others, use Add to Puffer instead. It also takes a title, text and dates, for example inside Repeat with Each.
+To add notes without touching others, use the **Add to Puffer** action instead. It also takes a title, text, dates and a folder, for example inside Repeat with Each.
 
-To try it, edit a note, run the shortcut, and ask an agent "What changed in my Puffer library recently?". The edited note shows up as updated.
+The simulator has no Notes app. There, export a note from a Mac as Markdown (or use any `.md` file) and open it in Puffer through the share sheet or the Files app: Markdown becomes a note in Imported.
 
-The simulator has no Notes app. A dev build reads the notes from a file instead and syncs them the way Sync Notes to Puffer does:
+## 5. Automated checks
+
+Node checks, no device needed:
 
 ```bash
-DEV=1D4B8ECF-A717-442E-9828-FCB3F93229DB
-DATA=$(xcrun simctl get_app_container $DEV dev.local.puffer data)
-cat > "$DATA/Documents/dev-notes.json" <<'EOF'
-[{"title": "Packing list", "text": "Passport, charger, rain jacket.", "created": "2026-09-01T08:00:00Z", "modified": "2026-09-02T09:30:00Z"}]
-EOF
-xcrun simctl openurl $DEV "puffer://dev-sync-notes"
+npm run test:editor
 ```
 
-The file replaces the source's whole contents, so `[]` removes every note. `created` and `modified` are optional ISO 8601 dates. A note is named by its title and creation date, and `modified` becomes its file date. Puffer opens Library when the sync is done, and Metro logs a `dev-sync-notes` line with the counts.
+Needs Node 24. It runs the Tiptap editor's Markdown codec (`src/ui/editor/markdown.ts`) through round trips over 5000+ documents. It does not run the byte-for-byte comparison with the native parser: that needs Swift, so it only runs on the Mac through `scripts/editor-markdown-check/run.sh` (which also runs the native parser, serializer and merge checks, then `tiptap.mjs` against the native output).
+
+```bash
+cd relay && npm run e2e
+```
+
+Starts the real relay as a child process, plays the phone and the agent over MCP and prints one PASS or FAIL line per assertion. `npm run typecheck` in `relay/` checks types, and `npm run lint` at the repo root runs Expo's ESLint.
+
+## 6. Compare the editors
+
+Start Metro with the editor you want and open the same notes in each (a long note with headings, lists, a checklist, a table and an attachment is a good test):
+
+```bash
+EXPO_PUBLIC_PUFFER_EDITOR=native npx expo start   # the default
+EXPO_PUBLIC_PUFFER_EDITOR=tiptap npx expo start   # Tiptap in an Expo DOM component
+EXPO_PUBLIC_PUFFER_EDITOR=enriched npx expo start # react-native-enriched-html spike
+```
+
+Check each in light and dark mode: typing, the keyboard bar and Aa panel, checklists, undo, saving (close and reopen the note), and an edit from an agent while the note is open. Rebuild or restart Metro with `--clear` after changing the variable, since it is inlined at bundle time.
 
 ## Things to know
 
 - Every redeploy restarts the relay. Waiting questions and unfinished sign-ins are lost, and agents ask again.
-- History in Puffer lists every answer and every change read, per agent.
+- History (Agents) lists every request and every change read, per agent.
 - Server logs: `fly logs -a puffer`. The pairing key is never printed there.

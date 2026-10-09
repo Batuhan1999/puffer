@@ -1,48 +1,61 @@
 # Puffer
 
-Puffer is a throwaway iOS demo for EmbeddingGemma 2. It keeps one vector index of your photo library and of document passages from txt, md, and pdf files. A text query finds both. The app downloads the model once (388 MB) on first launch. After that, embedding and search run on the phone with no network.
+Puffer is an iPhone notes app that agents can read and write. Notes and any document folders you grant (txt, md, pdf) are stored on the phone and indexed there for hybrid vector and keyword search, with embeddings from EmbeddingGemma 2 running on the device through LiteRT-LM. The app downloads the model once (388 MB) on first launch; after that, indexing and search need no network.
 
-The app is Expo SDK 57 with React Native Paper. The local Expo module in `modules/puffer-native` holds the item store, ranking, the LiteRT-LM v0.18.0 Swift `EmbeddingEngine`, the agent bridge and the system hooks.
+Agents (Claude Code over MCP with OAuth, or anything that speaks HTTP) reach the phone through a small relay at `https://puffer.fly.dev`. The relay stores no content: it queues each request, the phone picks it up, runs it locally and sends the result back. An agent is approved once, when it connects; after that its requests are answered without asking again, and everything it does shows in History. See `design/ARCHITECTURE.md`.
 
-## Build and run on the iOS simulator
+The app is Expo SDK 55 (React Native 0.83) with `@expo/ui` SwiftUI screens, iOS only.
 
-You need Xcode, CocoaPods, and an iOS simulator runtime.
+## Layout
 
-1. Download the LiteRT-LM binary and Swift sources:
+- Repo root: the Expo app. `src/app` has the routes (tabs for notes, folders and agents, the connect modal), `src/notes.tsx`, `src/bridge.tsx` and `src/store.tsx` are the React views over the native module, and `src/ui/editor/` holds the Tiptap editor and the editor switch.
+- `modules/puffer-native/`: the local Expo module. `ios/` has the note store, search engine, embedder, relay bridge and the native note editor (`ios/Editor/`), `app-target/PufferIntents.swift` the Shortcuts actions (copied into the app target by `app.plugin.js`), and `src/index.ts` the JS API.
+- `relay/`: the Node relay (MCP, HTTP API, OAuth, device sync) and its own README.
+- `design/`: architecture notes (`ARCHITECTURE.md`) and the note contract (`notes/CONTRACT.md`).
+- `scripts/`: `fetch-litert.sh` and the editor Markdown checks (`editor-markdown-check/`).
+- `TESTING.md` and `DEMO.md`: how to try it with real agents.
 
-	```sh
-	scripts/fetch-litert.sh
-	```
+## Run the app
 
-	The script writes `modules/puffer-native/ios/vendor/` (about 120 MB, gitignored), checks the zip's SHA-256, and skips files that already exist.
+You need Xcode, CocoaPods, Node 24 and an iOS simulator runtime.
 
-2. Build and launch the app:
+```sh
+npm install
+scripts/fetch-litert.sh   # LiteRT-LM binary and Swift sources into modules/puffer-native/ios/vendor/ (about 120 MB, gitignored)
+npx expo run:ios
+```
 
-	```sh
-	npx expo run:ios
-	```
+In the app, download the model when asked. A new install registers itself with `https://puffer.fly.dev`. After changing `app.json` or the module's podspec, run `npx expo prebuild --clean` before `npx expo run:ios`. For JS-only changes, `npm start` serves the dev build.
 
-3. In the app, tap **Download model**, then tap **+** and choose **Index photos** or **Add documents**.
+### Choosing the note editor
 
-To change `app.json` or the module's podspec after the first build, run `npx expo prebuild --clean` before `npx expo run:ios`.
+`EXPO_PUBLIC_PUFFER_EDITOR` selects the editor when Metro starts:
 
-## How the code is laid out
+- unset or `native`: the native UITextView editor (default).
+- `tiptap`: Tiptap in an Expo DOM component.
+- `enriched`: the react-native-enriched-html spike, opened from the note route.
 
-- `src/domain.ts` has the `Item`, `Query`, and `SearchResult` types.
-- `src/store.tsx` and `src/bridge.tsx` are the React views over the native module. Screens use only these.
-- `src/ingest.ts` imports picked documents. Photos and granted folders are indexed natively.
-- `src/model.ts` downloads the model to the path the native engine names.
-- `modules/puffer-native/ios/PufferEngine.swift` stores items, embeds, and ranks. `Bridge.swift`, `Triage.swift` and `Relay.swift` hold agent policy, consent and the relay sync. `Sources.swift` keeps photos and folders indexed. `SystemHooks.swift` holds background, notification and Spotlight hooks.
-- `modules/puffer-native/app-target/PufferIntents.swift` holds the App Intents. The module's config plugin copies it into the app target at prebuild.
+```sh
+EXPO_PUBLIC_PUFFER_EDITOR=tiptap npx expo start --clear
+```
 
-## What is not verified yet
+## Run the relay locally
 
-No one has built or run this app. Each item below needs a simulator or device run.
+```sh
+cd relay
+npm install
+npm run relay
+```
 
-- The pod builds with the vendored `CLiteRTLM.xcframework` (a dynamic framework) inside a `static_framework` pod, and CocoaPods embeds it in the app.
-- The CPU backend loads the model on the simulator. On a device, the module tries the GPU backend first and falls back to CPU.
-- `computeEmbeddingBatch` accepts text batches. If it throws, the module embeds texts one at a time.
-- `.imageFile` accepts the JPEG files that `expo-image-manipulator` writes.
-- The Hugging Face download follows its redirect and reports a total size.
-- The prompt format comes from the model's `config_sentence_transformers.json`. Queries use `task: search result | query: ` and passages use `title: {title} | text: `. The LiteRT-LM docs page lists different prefixes (`task: search query | text: `). If search quality is poor, try those.
-- Photo indexing speed, memory use, and how iCloud-only photos behave.
+Needs Node 24. Flags, the HTTP API and pairing a phone with a local relay are in `relay/README.md`.
+
+## Tests
+
+- `npm run test:editor` (Node 24): the Tiptap Markdown codec over 5000+ documents. The byte-for-byte comparison with the native parser runs only on a Mac, through `scripts/editor-markdown-check/run.sh`.
+- `cd relay && npm run e2e`: starts the real relay, plays the phone and agents against it. `npm run typecheck` checks types.
+- `npm run lint` and `npx tsc --noEmit` at the repo root.
+- Device and agent checks (Claude Code, HTTP agents, Apple Notes Shortcut, comparing editors) are in `TESTING.md`.
+
+## Not verified
+
+The native code is built and run on a Mac or device, not in cloud sessions. Changes marked "Unverified (cloud)" in the Swift sources still need a Mac build.
