@@ -25,6 +25,13 @@ const NoteIdArg = NoteId.describe('The note_id from search_notes, list_notes or 
 const Folder = z.string().trim().min(1).max(200).describe('A folder name, as list_note_folders names it.');
 const LATER = ' Like ask_puffer it can return processing or phone_offline with a request_id: call get_puffer_answer with it later.';
 
+/** How writes behave while the phone is offline. Shared by the write tools and GET /start. */
+export const QUEUED_WRITES =
+  'While the phone is offline, a write is queued on the relay instead (status queued, with a request_id) and applied ' +
+  'when the phone comes back, in the order you wrote, if that is within 7 days. Reads do not see a queued write until then.';
+const WRITE_LATER =
+  ' It can return processing with a request_id: call get_puffer_answer with it later. ' + QUEUED_WRITES;
+
 /** Shared by GET /start and the OpenAPI description. */
 export const NOTES_INTRO =
   "Puffer is a notes app on the user's iPhone. Once connected, you can read and write the user's notes and documents; " +
@@ -87,8 +94,9 @@ export const NOTE_OPERATIONS: readonly NoteOperation[] = [
     path: '/notes',
     description:
       'Create a note in Puffer. body is Markdown. Without a title, the first line of the body becomes the title; ' +
-      'without a folder, the note goes to the default folder. Returns the new note with its note_id and version.' +
-      LATER,
+      'without a folder, the note goes to the default folder. Returns the new note with its note_id and version. ' +
+      'Queued while the phone is offline, it returns the note_id the note will have.' +
+      WRITE_LATER,
     input: z.object({
       title: z.string().trim().min(1).max(300).optional().describe('The title. Omit it to take the first line of the body.'),
       body: z.string().max(NOTE_BODY_MAX).describe('The note in Markdown.'),
@@ -114,8 +122,9 @@ export const NOTE_OPERATIONS: readonly NoteOperation[] = [
     description:
       "Replace a note's whole body with new Markdown. Pass base_version, the version your last get_note returned. If " +
       'the note changed since, the status is conflict with current_version: call get_note again, reapply your edit to ' +
-      'the current body and retry with that version. To add to the end, append_to_note needs no version.' +
-      LATER,
+      'the current body and retry with that version. To add to the end, append_to_note needs no version. A queued ' +
+      'update to a note the user edited since base_version is merged line by line with their edits instead.' +
+      WRITE_LATER,
     input: z.object({
       note_id: NoteIdArg,
       body: z.string().max(NOTE_BODY_MAX).describe('The whole new body in Markdown.'),
@@ -127,7 +136,7 @@ export const NOTE_OPERATIONS: readonly NoteOperation[] = [
     name: 'delete_note',
     method: 'DELETE',
     path: '/notes/{note_id}',
-    description: 'Move a note to Recently Deleted in Puffer, where the user can restore it. Returns the note without its body.' + LATER,
+    description: 'Move a note to Recently Deleted in Puffer, where the user can restore it. Returns the note without its body.' + WRITE_LATER,
     input: z.object({ note_id: NoteIdArg }),
     query: ({ note_id }) => ({ kind: 'deleteNote', noteId: note_id }),
   }),
@@ -135,7 +144,7 @@ export const NOTE_OPERATIONS: readonly NoteOperation[] = [
     name: 'append_to_note',
     method: 'POST',
     path: '/notes/{note_id}/append',
-    description: 'Append text as a new paragraph at the end of a note. Needs no version, so it never conflicts. Returns the note after the change.' + LATER,
+    description: 'Append text as a new paragraph at the end of a note. Needs no version, so it never conflicts. Returns the note after the change.' + WRITE_LATER,
     input: z.object({ note_id: NoteIdArg, text: z.string().min(1).max(NOTE_APPEND_MAX).describe('Markdown to add at the end.') }),
     query: ({ note_id, text }) => ({ kind: 'appendToNote', noteId: note_id, text }),
   }),

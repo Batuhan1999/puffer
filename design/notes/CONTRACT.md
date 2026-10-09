@@ -2,6 +2,8 @@
 
 Status: fixed 2026-10-09 by the relay owner. Later changes are listed here, newest first, with the date.
 
+- 2026-10-09, offline write changelog: while the phone is offline, agent note writes are queued on the relay and answered `queued` instead of `phone_offline` (section 5). The phone receives them as ordinary `createNote`, `appendToNote`, `updateNote` and `deleteNote` requests with the new optional fields `queued`, `queuedAt` and, for a create, `noteId` (section 3a). Outcomes and acks are unchanged. Also: `SyncResponse.connects` and `approvedBy` on outcomes are gone (a phone that still sends `approvedBy` has it dropped).
+
 - 2026-10-09, OAuth sessions (relay only): an OAuth client now gets a 1-hour signed `at_` access token and a rotating 90-day `rt_` refresh token instead of the connection's `ak_` key, which no longer leaves the relay. The phone still approves by adding the connection's `keyDigest`, and removing that agent still ends access at once. `revokedKeys` also lists the agent of a session revoked for refresh token reuse or 90 days idle. No wire field changed.
 - 2026-10-09, photos removed from the app: agent-facing texts describe the library as notes and documents. The agent schemas no longer offer `image_size`, `include_images` or the `kind` filter (photo or document), so the relay never sends `imageSize` or `filters.kind` again. The wire fields themselves are unchanged. Nothing in sections 1 to 4 changed.
 - 2026-10-09, before any implementation shipped: no permission model. Every connected agent reads and writes everything; the phone never asks per request. Note requests are never reviewed, so the phone answers them at once and never sends `awaitingUser` for them (section 4), `approvedBy` on a note answer is always `grant`, and `/open/<id>` sends note requests to `puffer://agents`, not to a review screen (section 3). Connecting still needs the user's one approval of the link on the phone (section 2, unchanged).
@@ -13,11 +15,12 @@ The relay schema in `relay/src/protocol.ts` is authoritative once implemented. T
 ```
 POST /v1/device/register
 Content-Type: application/json
+Authorization: Bearer <Better Auth session token of the signed-in account>
 
 {"v": 1}
 ```
 
-No auth. The body may be empty. Replies:
+The account's session token (relay/README.md, Accounts); the device belongs to that account. Without a valid session the relay answers `401 {"error": "sign_in_required"}` (only a relay started with `--dev-open-register` skips this), and past the per-account cap `403 {"error": "device_limit"}`. The body may be empty. Replies:
 
 - `200 {"v": 1, "deviceId": "tn_<22 chars>", "deviceKey": "dk_<43 chars>"}` with `Cache-Control: no-store`. The relay stores only the SHA-256 digest of the key, so the phone must keep the key (Keychain) and use it exactly as a key from a `puffer://pair` link: `Authorization: Bearer dk_...` on `/v1/device/sync` and the device endpoints below. `deviceId` is for display and support only.
 - `429 {"error": "rate_limited", "message": "..."}` with `Retry-After: <seconds>`. Five registrations per caller address per hour.
@@ -27,7 +30,7 @@ Each device is its own tenant: its agents, requests, change pages, read cursors,
 
 ## 2. Connections: fetch by link, then confirm
 
-The relay no longer lists waiting connections in the sync response. `SyncResponse.connects` stays in the shape and is always `[]`. A phone learns about a connection only by being opened through its approve link, `puffer://connect/<id>?link=<secret>`, and fetching it:
+The relay no longer lists waiting connections in the sync response, and `SyncResponse` has no `connects` field. A phone learns about a connection only by being opened through its approve link, `puffer://connect/<id>?link=<secret>`, and fetching it:
 
 ```
 GET /v1/device/connects/by-link/<secret>
@@ -63,11 +66,31 @@ Every `WireRequest` keeps `{id, agentId, askedAt, expiresAt}` and adds `kind` pl
 
 `GET /open/<request id>` redirects to `puffer://agents` for a note request, as for `changes` and `sources`: there is nothing to review.
 
+## 3a. Queued writes (offline write changelog)
+
+A note write an agent makes while the phone is offline is queued on the relay, at most `--queued-ttl-ms` (7 days by default), and handed over on the phone's next sync like any other request, in the order the agents wrote them. It carries these extra fields, absent on every other request:
+
+| field | value |
+| --- | --- |
+| `queued` | `true` |
+| `queuedAt` | datetime: when the relay queued it |
+| `noteId` (on `createNote` only) | The id the relay already told the agent: a lowercase UUID, the phone's own format (`NoteBook.newID`). The phone creates the note with exactly this id, and the agent may already have queued appends, updates or a delete against it. |
+
+The phone applies them:
+
+- In the order received for each note, and once per request id (the `applied` table): a request id seen before returns its recorded outcome and writes nothing. A `createNote` whose `noteId` already exists is a replay and answers that note.
+- `appendToNote` appends as usual.
+- `updateNote` whose `baseVersion` is no longer current, because the user edited the note in the meantime, is merged line by line (`NoteMerge.merge`: base is the body at `baseVersion`, the agent's lines come first where they touch) instead of answering `conflict`. Only when the phone no longer has the body at `baseVersion` does it answer `conflict`.
+- `deleteNote` moves the note to Recently Deleted.
+- History marks the entry as written while offline.
+
+The outcome and ack are unchanged (section 4). The relay drops the write's text once it settles. A phone that does not know the fields runs the write as a live one.
+
 ## 4. Note outcomes (phone outbox)
 
 The outbox keeps its outcome kinds. Note requests use them like this:
 
-- `answered`, with exactly one of the new payload fields below set (and `items` empty or absent), and `approvedBy: "grant"`.
+- `answered`, with exactly one of the new payload fields below set (and `items` empty or absent). `approvedBy` is no longer read; the relay drops it.
 - `nothingFound`: no match for a search or list, or `noteId` names no note (including one already in Recently Deleted).
 - `declined`: the phone refused without running it, for example under a rate limit. Not a user decision.
 - `failed` with `reason` (user-safe, 1 to 200 characters).
@@ -107,4 +130,4 @@ An `answered` outcome whose payload does not fit its request (for example `notes
 
 ## 5. What agents see (for reference, relay-side)
 
-MCP tools: `search_notes`, `list_notes`, `list_note_folders`, `get_note`, `create_note`, `append_to_note`, `update_note`, `delete_note`, with snake_case arguments (`note_id`, `base_version`). HTTP: `GET /v1/notes/search`, `GET /v1/notes`, `GET /v1/notes/folders`, `GET /v1/notes/{note_id}`, `POST /v1/notes`, `POST /v1/notes/{note_id}/append`, `PATCH /v1/notes/{note_id}`, `DELETE /v1/notes/{note_id}`. Statuses: `answered`, `nothing_found`, `declined`, `failed`, `expired`, `conflict` (with `current_version`), plus `processing` and `phone_offline`, collected with `get_puffer_answer` as for asks. No note status is `waiting_for_user`. Agent-facing texts no longer describe access levels or per-request approval; they say that a connected agent can read and write the user's notes and documents.
+MCP tools: `search_notes`, `list_notes`, `list_note_folders`, `get_note`, `create_note`, `append_to_note`, `update_note`, `delete_note`, with snake_case arguments (`note_id`, `base_version`). HTTP: `GET /v1/notes/search`, `GET /v1/notes`, `GET /v1/notes/folders`, `GET /v1/notes/{note_id}`, `POST /v1/notes`, `POST /v1/notes/{note_id}/append`, `PATCH /v1/notes/{note_id}`, `DELETE /v1/notes/{note_id}`. Statuses: `answered`, `nothing_found`, `declined`, `failed`, `expired`, `conflict` (with `current_version`), plus `processing` and `phone_offline`, collected with `get_puffer_answer` as for asks. A write while the phone is offline answers `queued` (with `queued_at`, `kept_until`, `open_url`, and `note_id` for a create), also collected with `get_puffer_answer`; past the device's queue caps it is refused with `429 offline_queue_full` (MCP: an error result) and nothing is queued. No note status is `waiting_for_user`. Agent-facing texts no longer describe access levels or per-request approval; they say that a connected agent can read and write the user's notes and documents.

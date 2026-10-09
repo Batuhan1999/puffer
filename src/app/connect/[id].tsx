@@ -44,7 +44,7 @@ export default function ConnectScreen() {
             Done
           </Stack.Toolbar.Button>
         </Stack.Toolbar>
-        {bridge.loaded && (heard || bridge.relay.kind === 'unpaired') ? (
+        {bridge.loaded && (heard || bridge.relay.kind !== 'paired') ? (
           <Unavailable
             title="No Longer Waiting"
             systemImage="link"

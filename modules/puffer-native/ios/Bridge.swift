@@ -84,6 +84,9 @@ struct LedgerEntry: Codable, Sendable {
   /// nil ranks by relevance.
   var recency: Recency? = nil
   var note: NoteRequest? = nil
+  // Unverified (cloud): validate on the Mac
+  /// A note write the relay queued while this phone was offline. History shows it as written while offline.
+  var queued: QueuedWrite? = nil
   let receivedAt: Date
   let expiresAt: Date
   var phase: RequestPhase
@@ -132,6 +135,9 @@ enum BridgeError: Error, LocalizedError {
 
 enum RelayStatus: Sendable {
   case unpaired
+  // Unverified (cloud): validate on the Mac
+  /// No relay and no account session: Puffer registers once the user signs in.
+  case signedOut
   case paired(url: URL, lastContact: Date?, lastError: String?)
 }
 
@@ -209,6 +215,13 @@ actor Bridge {
   /// Set when the hosted relay forgot this iPhone and Puffer registered again; cleared by the next connected agent.
   private var reconnectAgents = false
   private var registering: Task<Void, Never>?
+  // Unverified (cloud): validate on the Mac
+  /// The relay account's session token (RelaySessionKeychain). Registration needs it; syncing uses the device key.
+  private var sessionToken: String?
+  // Unverified (cloud): validate on the Mac
+  /// Set while a key rotation or a delete is in flight: a 401 to a sync that still carried the old key is not a lost
+  /// device, so Puffer does not register again.
+  private var changingDevice = false
   private var changeAnswers: [RequestID: ChangeAnswer] = [:]
   /// The next_cursor the relay last returned to each agent. Pages are computed since it.
   private var readCursors: [AgentID: String] = [:]
@@ -247,6 +260,8 @@ actor Bridge {
     relayRegistryRevision = meta["relayRegistryRevision"] ?? 0
     reconnectAgents = meta["reconnectAgents"] == 1
     link = RelayKeychain.load()
+    // Unverified (cloud): validate on the Mac
+    sessionToken = RelaySessionKeychain.load()
     tables = opened
     expireStale()
     pruneLedger()
@@ -270,7 +285,8 @@ actor Bridge {
     expireStale()
     let notice = lastError ?? (reconnectAgents ? Self.reconnectNotice : nil)
     return BridgeSnapshot(
-      relay: link.map { .paired(url: $0.relay, lastContact: lastContact, lastError: notice) } ?? .unpaired,
+      // Unverified (cloud): validate on the Mac
+      relay: link.map { .paired(url: $0.relay, lastContact: lastContact, lastError: notice) } ?? (sessionToken == nil ? .signedOut : .unpaired),
       agents: agents, requests: ledger.values.sorted { $0.receivedAt > $1.receivedAt }, connects: pendingConnects(),
       reads: reads.reversed())
   }
@@ -381,21 +397,40 @@ actor Bridge {
     for (id, started) in checking where now.timeIntervalSince(started) > Self.checkTimeout {
       fail(id, "Searching took too long.")
     }
-    for entry in ledger.values where entry.phase.tag == .received {
+    // Unverified (cloud): validate on the Mac
+    // Oldest first, so writes queued while offline keep their order when a failure left some for later.
+    for entry in ledger.values.sorted(by: { $0.receivedAt < $1.receivedAt }) where entry.phase.tag == .received {
       await triage(entry.id)
     }
   }
 
   // MARK: relay
 
-  /// A new install with no pairing registers itself with the default relay, once. A user who unpaired is not
-  /// registered again. Failures retry on the next foreground.
+  // Unverified (cloud): validate on the Mac
+  /// The signed-in account's session token from JS (src/auth.ts), or nil on sign-out. A new token on an iPhone without
+  /// a relay registers it, even after an unpair: signing in is asking to connect. Signing out keeps the device and its
+  /// agents; the token only gates registration. The same token again changes nothing.
+  func setSession(_ token: String?) async throws {
+    try start()
+    guard token != sessionToken else { return }
+    if let token { try RelaySessionKeychain.save(token) } else { try RelaySessionKeychain.delete() }
+    sessionToken = token
+    Changes.post(.relay)
+    guard token != nil, link == nil else { return }
+    UserDefaults.standard.set(false, forKey: Self.registeredKey)
+    await ensureRegistered()
+  }
+
+  // Unverified (cloud): validate on the Mac
+  /// A new install with no pairing registers itself with the default relay, once the user signed in (the relay requires
+  /// an account session). A user who unpaired is not registered again until they sign in again. Failures retry on the
+  /// next foreground; a rejected session is dropped, so Agents asks the user to sign in.
   func ensureRegistered() async {
-    guard (try? start()) != nil, link == nil, !UserDefaults.standard.bool(forKey: Self.registeredKey) else { return }
+    guard (try? start()) != nil, link == nil, !UserDefaults.standard.bool(forKey: Self.registeredKey), let session = sessionToken else { return }
     if let registering { return await registering.value }
     let task = Task {
       do {
-        let registered = try await RelayClient.register(RelayClient.defaultRelay)
+        let registered = try await RelayClient.register(RelayClient.defaultRelay, session: session)
         guard self.link == nil else { return }
         try RelayKeychain.save(registered)
         UserDefaults.standard.set(true, forKey: Self.registeredKey)
@@ -405,6 +440,14 @@ actor Bridge {
         pufferLog.notice("registered with \(registered.relay.absoluteString, privacy: .public)")
         Changes.post(.relay)
         self.restartLoop()
+      } catch RelayFailure.unauthorized {
+        // Unverified (cloud): validate on the Mac
+        pufferLog.notice("relay refused the account session; signed out")
+        if self.sessionToken == session {
+          try? RelaySessionKeychain.delete()
+          self.sessionToken = nil
+          Changes.post(.relay)
+        }
       } catch {
         pufferLog.error("registration failed: \(error.localizedDescription, privacy: .public)")
       }
@@ -439,6 +482,69 @@ actor Bridge {
     link = nil
     loop?.cancel()
     loop = nil
+    Changes.post(.relay)
+  }
+
+  // Unverified (cloud): validate on the Mac
+  /// Asks the relay for a new device key and stores it. Agents, cursors and the ledger stay: it is the same device on
+  /// the same relay. The loop restarts with the new key; a response to an exchange that used the old one is dropped.
+  func rotateDeviceKey() async throws {
+    try start()
+    guard let link else { throw BridgeError.notPaired }
+    guard !changingDevice else { return }
+    changingDevice = true
+    defer { changingDevice = false }
+    loop?.cancel()
+    loop = nil
+    parkedPoll?.cancel()
+    let rotated: PairingLink
+    do {
+      rotated = try await RelayClient(link: link).rotateDeviceKey()
+    } catch {
+      restartLoop()
+      throw error
+    }
+    guard self.link == link else { return }
+    do {
+      try RelayKeychain.save(rotated)
+    } catch {
+      pufferLog.error("rotated device key not saved: \(error.localizedDescription, privacy: .public)")
+    }
+    self.link = rotated
+    lastError = nil
+    pufferLog.notice("rotated the device key")
+    Changes.post(.relay)
+    restartLoop()
+  }
+
+  // Unverified (cloud): validate on the Mac
+  /// Deletes this iPhone's data on the relay (its device, agent keys and queued requests), then forgets the relay here
+  /// like `unpair` and removes every agent, whose keys no longer work. Puffer does not register again by itself.
+  func deleteRelayData() async throws {
+    try start()
+    guard let link else { throw BridgeError.notPaired }
+    guard !changingDevice else { return }
+    changingDevice = true
+    defer { changingDevice = false }
+    loop?.cancel()
+    loop = nil
+    parkedPoll?.cancel()
+    do {
+      try await RelayClient(link: link).deleteDevice()
+    } catch {
+      restartLoop()
+      throw error
+    }
+    guard self.link == link else { return }
+    try RelayKeychain.delete()
+    try forgetRelay()
+    self.link = nil
+    UserDefaults.standard.set(true, forKey: Self.registeredKey)
+    for agent in agents { try tables?.agents.delete(agent.id.rawValue) }
+    agents.removeAll()
+    try bumpRegistry()
+    setReconnectAgents(false)
+    Changes.post(.policy)
     Changes.post(.relay)
   }
 
@@ -571,6 +677,7 @@ actor Bridge {
         case let .note(note):
           var noted = entry(request, question: await NoteBook.shared.describe(note), filters: nil)
           noted.note = note
+          noted.queued = request.queued // Unverified (cloud): validate on the Mac
           entries.append(noted)
         case let .changes(since, limit):
           if let answer = await answerChanges(request, since: since, limit: limit), self.link == link {
@@ -691,7 +798,8 @@ actor Bridge {
   /// The hosted relay no longer knows this iPhone's key, for example after its state was lost. Retrying the dead key
   /// would fail forever, so Puffer registers as a new device; agents connected through the old one connect again.
   private func registerAgain(_ stale: PairingLink) {
-    guard link == stale else { return }
+    // Unverified (cloud): validate on the Mac
+    guard link == stale, !changingDevice else { return }
     pufferLog.notice("relay rejected the device key, registering again")
     try? forgetRelay()
     try? RelayKeychain.delete()
@@ -803,6 +911,16 @@ actor Bridge {
       id: wire.id, agentID: wire.agentId, agentName: agent?.name ?? "Disconnected agent", question: String(question.prefix(500)),
       filters: filters, receivedAt: wire.askedAt, expiresAt: wire.expiresAt,
       phase: agent == nil ? .denied(.agentRevoked, at: Date()) : .received, reported: nil)
+  }
+
+  // Unverified (cloud): validate on the Mac
+  /// The note a write goes to: its note id, or for a queued create the id the relay minted.
+  private static func target(of entry: LedgerEntry) -> NoteID? {
+    switch entry.note {
+    case let .append(id, _)?, let .update(id, _, _)?, let .delete(id)?: id
+    case .create?: entry.queued?.noteID
+    default: nil
+    }
   }
 
   /// How History names a listing, which has no question of its own.
@@ -958,6 +1076,11 @@ actor Bridge {
   private func triage(_ id: RequestID) async -> Bool {
     guard let entry = ledger[id], entry.phase.tag == .received, checking[id] == nil else { return false }
     if let retry = checkRetries[id], retry.at > Date() { return false }
+    // Unverified (cloud): validate on the Mac
+    // A queued write waits for an earlier queued write to the same note that is still to run (one left for a retry).
+    if entry.queued != nil, let target = Self.target(of: entry), ledger.values.contains(where: {
+      $0.queued != nil && $0.id != id && $0.phase.tag == .received && $0.receivedAt < entry.receivedAt && Self.target(of: $0) == target
+    }) { return false }
     guard let agent = agents.first(where: { $0.id == entry.agentID }) else {
       try? setPhase(id, .denied(.agentRevoked, at: Date()))
       Changes.post(.requests)
@@ -968,7 +1091,7 @@ actor Bridge {
     do {
       let next: RequestPhase
       if let request = entry.note {
-        switch try await NoteBook.shared.handle(request, requestID: id, agent: .agent(id: agent.id, name: agent.name)) {
+        switch try await NoteBook.shared.handle(request, requestID: id, agent: .agent(id: agent.id, name: agent.name), queued: entry.queued) {
         case let .done(result): next = .note(result, at: Date())
         case .nothingFound: next = .nothingFound(at: Date())
         case let .refused(reason): next = .failed(reason: reason, at: Date())

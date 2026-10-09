@@ -50,6 +50,7 @@ const TOOLS = [
 ];
 
 const handed = { id: z.string(), agentId: z.string(), askedAt: z.string(), expiresAt: z.string() };
+const queuedFlags = { queued: z.literal(true).optional(), queuedAt: z.string().optional() };
 const SyncReply = z.strictObject({
   v: z.literal(1),
   requests: z.array(
@@ -73,6 +74,10 @@ const SyncReply = z.strictObject({
       z.strictObject({ ...handed, kind: z.literal('changes'), since: z.string().nullable(), limit: z.number() }),
       z.strictObject({ ...handed, kind: z.literal('sources') }),
       z.strictObject({ ...handed, kind: z.literal('getNote'), noteId: z.string() }),
+      z.strictObject({ ...handed, ...queuedFlags, kind: z.literal('createNote'), noteId: z.string().optional(), title: z.string().optional(), body: z.string(), folder: z.string().optional() }),
+      z.strictObject({ ...handed, ...queuedFlags, kind: z.literal('appendToNote'), noteId: z.string(), text: z.string() }),
+      z.strictObject({ ...handed, ...queuedFlags, kind: z.literal('updateNote'), noteId: z.string(), body: z.string(), baseVersion: z.number() }),
+      z.strictObject({ ...handed, ...queuedFlags, kind: z.literal('deleteNote'), noteId: z.string() }),
     ]),
   ),
   acked: z.array(z.strictObject({ id: z.string(), kind: z.string() })),
@@ -1327,6 +1332,139 @@ async function lifecycleChecks(statePath: string): Promise<void> {
   }
 }
 
+const OFFLINE_TTL_MS = 5_000;
+const WRITE_KINDS = ['createNote', 'appendToNote', 'updateNote', 'deleteNote'];
+
+/**
+ * The offline write changelog on its own relay with small queue limits: with the phone offline, create, append, update
+ * and delete answer queued (a create with the note id it will have), reads do not see them, GET /v1/device counts them;
+ * the next sync hands them over in order with their flags, the phone answers, the relay acks and the queue is empty.
+ * Then a queued write expires after --queued-ttl-ms, the caps refuse with offline_queue_full, and deleting the device
+ * drops its queue.
+ */
+async function offlineWriteChecks(statePath: string): Promise<void> {
+  const relay = await startRelay(statePath, {}, ['--queued-ttl-ms', String(OFFLINE_TTL_MS), '--queued-writes-max', '4', '--queued-bytes-max', '500']);
+  try {
+    const { base } = relay;
+    const deviceKey = String((await registerDevice(base)).json.deviceKey ?? '');
+    const sync = phone(base, deviceKey);
+    const kinds = [...PHONE_KINDS, ...WRITE_KINDS];
+    await sync({ registry: { revision: 1, agents: [wireAgent(agents.A), wireAgent(agents.B)] }, requestKinds: kinds });
+    const device = async () => (await api(base, '/v1/device', deviceKey)).json as Record<string, any>;
+    await sleep(OFFLINE_AFTER_MS + 300);
+
+    const key = agents.A.key;
+    const create = await api(base, '/v1/notes', key, { body: { title: 'Trip', body: 'Pack the tent.', wait: 0 } });
+    const noteId = String(create.json.note_id ?? '');
+    const append = await api(base, `/v1/notes/${noteId}/append`, key, { body: { text: 'And the stove.', wait: 0 } });
+    const update = await api(base, '/v1/notes/n_groceries', key, { method: 'PATCH', body: { body: 'Milk\nEggs', base_version: 3, wait: 0 } });
+    const remove = await api(base, '/v1/notes/n_old?wait=0', key, { method: 'DELETE' });
+    const writes = [create, append, update, remove];
+    const ids = writes.map((reply) => String(reply.json.request_id));
+    const read = await api(base, `/v1/notes/${noteId}?wait=0`, key);
+    const counted = await device();
+    const keptUntil = Date.parse(String(create.json.kept_until));
+    check(
+      'with the phone offline, create, append, update and delete answer queued with a request_id, queued_at and kept_until (the --queued-ttl-ms later); the create names the note_id it will have, a lowercase UUID; the text says the write is queued, applied when the phone comes back, and that reads do not show it yet',
+      writes.every((reply) => reply.status === 200 && reply.json.status === 'queued' && String(reply.json.request_id).startsWith('rq_')) &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(noteId) && append.json.note_id === undefined &&
+        Math.abs(keptUntil - Date.parse(String(create.json.queued_at)) - OFFLINE_TTL_MS) < 1_500 &&
+        writes.every((reply) => /queued this write/.test(String(reply.json.message)) && /do not show it/.test(String(reply.json.message))) &&
+        String(create.json.message).includes(`note_id ${noteId}`) && /merges your lines/.test(String(update.json.message)),
+      writes.map((reply) => reply.json),
+    );
+    check(
+      'a read while writes are queued is not a write: get_note on the queued note answers phone_offline; GET /v1/device counts 4 queued writes',
+      read.json.status === 'phone_offline' && counted.queuedWrites === 4 && counted.online === false,
+      { read: read.json.status, counted },
+    );
+
+    const delivered = await sync({ requestKinds: kinds });
+    const handedWrites = delivered.requests.filter((r) => WRITE_KINDS.includes(r.kind));
+    const getNote = delivered.requests.find((r) => r.kind === 'getNote');
+    const flags = handedWrites.map((r) => ({ queued: (r as { queued?: boolean }).queued, queuedAt: (r as { queuedAt?: string }).queuedAt }));
+    const handedCreate = handedWrites[0] as { noteId?: string; title?: string } | undefined;
+    check(
+      'the next sync hands the queued writes over in the order they were written, with queued: true and queuedAt; the create carries the note id the agent was told, the other writes no extra noteId; the read comes without the flags',
+      isDeepStrictEqual(handedWrites.map((r) => r.id), ids) &&
+        isDeepStrictEqual(handedWrites.map((r) => r.kind), WRITE_KINDS) &&
+        flags.every(({ queued, queuedAt }) => queued === true && typeof queuedAt === 'string' && !Number.isNaN(Date.parse(queuedAt))) &&
+        handedCreate?.noteId === noteId && handedCreate.title === 'Trip' &&
+        (handedWrites[1] as { noteId?: string }).noteId === noteId &&
+        getNote !== undefined && !('queued' in getNote) && !('queuedAt' in getNote),
+      delivered.requests,
+    );
+    const processing = await api(base, `/v1/answers/${ids[0]}?wait=0`, key);
+
+    const meta = { folder: 'Notes', created: '2026-10-09T09:00:00Z', modified: '2026-10-09T09:05:00Z', pinned: false };
+    const answered = await sync({
+      requestKinds: kinds,
+      outbox: [
+        { id: ids[0], kind: 'answered', note: { id: noteId, title: 'Trip', ...meta, version: 1, body: '# Trip\n\nPack the tent.' } },
+        { id: ids[1], kind: 'answered', note: { id: noteId, title: 'Trip', ...meta, version: 2, body: '# Trip\n\nPack the tent.\n\nAnd the stove.' } },
+        { id: ids[2], kind: 'answered', note: { id: 'n_groceries', title: 'Milk', ...meta, version: 5, body: 'Milk\nEggs\nBread' } },
+        { id: ids[3], kind: 'answered', note: { id: 'n_old', title: 'Old', ...meta, version: 2, body: null } },
+        { id: getNote?.id, kind: 'nothingFound' },
+      ],
+    });
+    const created = await api(base, `/v1/answers/${ids[0]}?wait=0`, key);
+    const merged = await api(base, `/v1/answers/${ids[2]}?wait=0`, key);
+    const deleted = await api(base, `/v1/answers/${ids[3]}?wait=0`, key);
+    const after = await device();
+    const again = await sync({ requestKinds: kinds });
+    check(
+      'while the phone is online a queued write reads processing; the phone answers all four, the relay acks them by request id, get_puffer_answer returns each note (the create under the minted id), GET /v1/device counts 0 queued and the next sync hands none over again',
+      processing.json.status === 'processing' &&
+        isDeepStrictEqual(answered.acked, [...ids.map((id) => ({ id, kind: 'answered' })), { id: getNote?.id, kind: 'nothingFound' }]) &&
+        created.json.status === 'answered' && created.json.note?.note_id === noteId &&
+        merged.json.status === 'answered' && merged.json.note?.version === 5 && deleted.json.status === 'answered' &&
+        after.queuedWrites === 0 && again.requests.length === 0,
+      { processing: processing.json.status, acked: answered.acked, created: created.json, after, again: again.requests.map((r) => r.id) },
+    );
+
+    await sleep(OFFLINE_AFTER_MS + 300);
+    const tooLarge = await api(base, '/v1/notes', key, { body: { body: 'x'.repeat(501), wait: 0 } });
+    const capped = [];
+    for (const text of ['one', 'two', 'three', 'four', 'five']) capped.push(await api(base, `/v1/notes/${noteId}/append`, key, { body: { text, wait: 0 } }));
+    const full = capped[4];
+    const queuedBeforeExpiry = (await device()).queuedWrites;
+    check(
+      'the queue caps hold per tenant: past --queued-bytes-max of note text a write is refused, and past --queued-writes-max (4) the next is too: 429 offline_queue_full saying nothing was written or queued and to have the user open Puffer',
+      tooLarge.status === 429 && tooLarge.json.error === 'offline_queue_full' && /500 characters/.test(String(tooLarge.json.message)) &&
+        capped.slice(0, 4).every((reply) => reply.json.status === 'queued') &&
+        full?.status === 429 && full.json.error === 'offline_queue_full' &&
+        /nothing was written or queued/.test(String(full.json.message)) && /4 queued writes/.test(String(full.json.message)) &&
+        queuedBeforeExpiry === 4,
+      { tooLarge: tooLarge.json, full: full?.json, queuedBeforeExpiry },
+    );
+
+    await sleep(OFFLINE_TTL_MS + 500);
+    const lapsed = await api(base, `/v1/answers/${String(capped[0]?.json.request_id)}?wait=0`, key);
+    const afterExpiry = (await device()).queuedWrites;
+    const afterExpirySync = await sync({ requestKinds: kinds });
+    check(
+      'a queued write the phone does not collect within --queued-ttl-ms expires: get_puffer_answer says expired, GET /v1/device counts 0 and the phone is never handed it',
+      lapsed.json.status === 'expired' && afterExpiry === 0 && afterExpirySync.requests.length === 0,
+      { lapsed: lapsed.json.status, afterExpiry, handed: afterExpirySync.requests },
+    );
+
+    await sleep(OFFLINE_AFTER_MS + 300);
+    const pending = await api(base, '/v1/notes', agents.B.key, { body: { body: 'Left behind.', wait: 0 } });
+    const before = (await device()).queuedWrites;
+    const removed = await api(base, '/v1/device', deviceKey, { method: 'DELETE' });
+    const gone = await api(base, `/v1/answers/${String(pending.json.request_id)}?wait=0`, agents.B.key);
+    const fresh = (await registerDevice(base)).json;
+    const freshDevice = (await api(base, '/v1/device', String(fresh.deviceKey))).json;
+    check(
+      'DELETE /v1/device drops the tenant with its queued writes: the agent key then 401s, and a new device starts with 0 queued',
+      pending.json.status === 'queued' && before === 1 && removed.status === 200 && gone.status === 401 && freshDevice.queuedWrites === 0,
+      { pending: pending.json.status, before, removed: removed.status, gone: gone.status, freshDevice },
+    );
+  } finally {
+    await relay.stop();
+  }
+}
+
 async function run(statePath: string): Promise<void> {
   let relay = await startRelay(statePath);
   try {
@@ -2343,6 +2481,7 @@ try {
   await run(join(dir, 'registry.json'));
   await addressChecks(join(dir, 'strict', 'registry.json'));
   await lifecycleChecks(join(dir, 'lifecycle', 'registry.json'));
+  await offlineWriteChecks(join(dir, 'offline', 'registry.json'));
 } catch (error) {
   failed++;
   console.log(`FAIL  e2e aborted: ${error instanceof Error ? error.stack : String(error)}`);

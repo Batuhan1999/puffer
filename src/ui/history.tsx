@@ -16,7 +16,7 @@ export function HistoryRow({ entry }: { entry: HistoryEntry }) {
           entry.request.agentName,
           entry.request.writes ? 'square.and.pencil' : 'magnifyingglass',
           entry.request.question,
-          requestOutcome(entry.request),
+          entry.request.queuedAt === null ? requestOutcome(entry.request) : `Written while offline · ${requestOutcome(entry.request)}`,
         ]
       : [entry.read.agentName, 'clock.arrow.circlepath', 'Checked for changes', readOutcome(entry.read)];
   return (

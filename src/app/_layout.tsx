@@ -20,6 +20,7 @@ export default function RootLayout() {
               <Stack screenOptions={{ headerShown: false, contentStyle: screenBackground }}>
                 <Stack.Screen name="(tabs)" />
                 <Stack.Screen name="connect/[id]" options={{ presentation: 'modal', headerShown: true }} />
+                <Stack.Screen name="sign-in" options={{ presentation: 'modal', headerShown: true }} />
               </Stack>
             </Gate>
           </NotesProvider>

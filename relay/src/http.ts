@@ -6,7 +6,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 
 import { z } from 'zod';
 
-import { NOTE_OPERATIONS, NOTES_INTRO } from './notes';
+import { NOTE_OPERATIONS, NOTES_INTRO, QUEUED_WRITES } from './notes';
 import { LINK_INTERVAL_S } from './oauth';
 import {
   ASK_DESCRIPTION,
@@ -245,6 +245,9 @@ const STATUS_MEANING: Record<Structured['status'], string> = {
   failed: 'Settled. The phone could not check the request; reason says why. Ask again later if you still need it.',
   processing: 'Not final. The phone has it; call get_puffer_answer shortly.',
   phone_offline: 'Not final. Queued until Puffer runs; call get_puffer_answer later and ask the user to open open_url.',
+  queued:
+    'Not final. A note write (create, append, update, delete) queued on the relay while the phone is offline, applied when Puffer comes back, in the order written, ' +
+    'until kept_until. Reads do not see it until then. A create carries the note_id the note will have. Call get_puffer_answer later for the result.',
 };
 
 const text = (description: string) => ({ type: 'string', description });
@@ -322,6 +325,9 @@ const RESULT_SCHEMA = {
     prepared_at: { type: 'string', format: 'date-time', description: 'Set when the phone was offline and prepared this page earlier.' },
     open_url: { type: 'string', format: 'uri', description: 'A link that opens Puffer on the phone. Give it to the user.' },
     last_seen_at: { type: ['string', 'null'], format: 'date-time', description: 'phone_offline: when the phone last synced.' },
+    queued_at: { type: 'string', format: 'date-time', description: 'queued: when the relay queued the write.' },
+    kept_until: { type: 'string', format: 'date-time', description: 'queued: the write expires unapplied after this.' },
+    note_id: text('queued create_note: the note_id the new note will have once Puffer applies it.'),
     reason: text('failed: why the phone could not check the request, safe to show the user.'),
     notes: {
       type: 'array',
@@ -549,6 +555,8 @@ Puffer keeps the user's notes as Markdown in folders. Read and write them:
 
 Searches and listings return note_id, title, folder, dates, version and a snippet; get the body with GET /v1/notes/<note_id>. To edit, get the note, change its body and PATCH it with the version you read. If the note changed in between, the status is conflict with current_version: get it again, reapply your edit and retry. To add to the end, append needs no version.
 
+${QUEUED_WRITES}
+
 ## What each status means
 
 Every answer has status, request_id and message.
@@ -557,6 +565,7 @@ Every answer has status, request_id and message.
 - nothing_found: Nothing matched this query. If every query found nothing, tell the user Puffer found nothing. Do not guess.
 - processing: The phone is working on it. Fetch the answer shortly with GET /v1/answers/<request_id>.
 - phone_offline: Ask the user to open Puffer with the open_url link, then fetch the answer later with GET /v1/answers/<request_id>.
+- queued: A note write (create, append, update, delete) queued while the phone is offline, applied when Puffer comes back, in the order you wrote, until kept_until. Reads do not show it before then. A create carries the note_id the note will have, so you can keep writing to it. Fetch the result later with GET /v1/answers/<request_id>.
 - declined: Puffer on the phone did not run the request. Ask again later only if you still need it.
 - rate_limited: Puffer on the phone limits how often you can read. Wait a minute, then ask again.
 - disconnected: The user disconnected you in Puffer. Connect again only if the user asks you to.
@@ -564,6 +573,6 @@ Every answer has status, request_id and message.
 - expired: The request ran out. Ask again only if you still need the answer.
 - failed: Puffer could not check the request on the phone; reason says why. Tell the user, and ask again later only if you still need the answer.
 
-A 401 means the user removed you in Puffer. Connect again only if the user asks you to. A 429 means too many requests: wait as long as Retry-After says, or collect your open requests first.
+A 401 means the user removed you in Puffer. Connect again only if the user asks you to. A 429 means too many requests: wait as long as Retry-After says, or collect your open requests first. A 429 offline_queue_full means the phone is offline and the relay already holds as many queued writes as it can: nothing was written; ask the user to open Puffer, then try again.
 `;
 }

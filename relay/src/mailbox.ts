@@ -1,8 +1,12 @@
 // Parked requests, the device long-poll and the change pages the phone sends ahead. In memory only: a restart
 // drops parked requests (agents then see `expired`) and pages. No content decisions happen here; the phone
 // decides, the mailbox carries.
+//
+// The offline write changelog lives here too: a note write asked while the phone is offline is a request like any
+// other, marked `queuedAt`, kept queuedTtlMs instead of ttlMs and counted against the tenant's queue caps instead of
+// maxOpenPerAgent. The agent hears `queued`; the phone gets it on its next sync, in order (protocol.ts).
 
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 
 import { RateLimit } from './limits';
@@ -16,6 +20,7 @@ import {
   type ChangesPage,
   type Cursor,
   type NoteFolder,
+  type NoteId,
   type NoteSummary,
   type Outcome,
   type OutcomeKind,
@@ -75,9 +80,14 @@ export type RequestState =
 export type RelayRequest = {
   readonly id: RequestId;
   readonly agentId: AgentId;
-  readonly query: RequestQuery;
+  /** A queued write's content goes once it settles (withoutContent). */
+  query: RequestQuery;
   readonly askedAt: number;
-  readonly expiresAt: number;
+  expiresAt: number;
+  /** Set when a note write went into the offline write changelog: the phone was offline when it was asked or waited on. */
+  queuedAt: number | null;
+  /** A queued create's note id, told to the agent before the phone runs it (mintNoteId). */
+  noteId: NoteId | null;
   state: RequestState;
 };
 
@@ -100,7 +110,60 @@ export type ToolOutcome = { requestId: RequestId } & (
   | { status: 'failed'; reason: string }
   | { status: 'processing' }
   | { status: 'phone_offline'; lastSeenAt: number | null }
+  /** A note write in the offline write changelog. `noteId`: the id a queued create's note will have. */
+  | { status: 'queued'; of: WriteKind; queuedAt: number; keptUntil: number; noteId: NoteId | null }
 );
+
+/** The note writes the relay queues while the phone is offline. */
+export type WriteKind = Extract<RequestQuery['kind'], 'createNote' | 'appendToNote' | 'updateNote' | 'deleteNote'>;
+
+const WRITE_KINDS: ReadonlySet<RequestQuery['kind']> = new Set<WriteKind>(['createNote', 'appendToNote', 'updateNote', 'deleteNote']);
+
+export const isWrite = (query: RequestQuery): query is Extract<RequestQuery, { kind: WriteKind }> => WRITE_KINDS.has(query.kind);
+
+/**
+ * The note id a queued create's note gets, minted by the relay so the agent can keep writing to it while the phone is
+ * away. The phone's own format (NoteBook.newID in Notes.swift): a lowercase UUID.
+ */
+function mintNoteId(): NoteId {
+  return randomUUID().toLowerCase() as NoteId;
+}
+
+/**
+ * The id the phone gives a live create's note: `rq_<id>` becomes `rq-<id>` (NoteBook.noteID(for:) in
+ * NoteRequests.swift). A create the phone was already handed before it went offline may have run with it.
+ */
+function liveNoteId(id: RequestId): NoteId {
+  return id.replaceAll('_', '-').slice(0, 64) as NoteId;
+}
+
+/** UTF-16 units of the note content a write holds, counted against queuedBytesMax. */
+function queuedBytes(query: RequestQuery): number {
+  switch (query.kind) {
+    case 'createNote':
+      return query.body.length + (query.title?.length ?? 0) + (query.folder?.length ?? 0);
+    case 'appendToNote':
+      return query.text.length;
+    case 'updateNote':
+      return query.body.length;
+    default:
+      return 0;
+  }
+}
+
+/** A settled queued write keeps what the agent's status needs (kind, note id, base version), not the note content. */
+function withoutContent(query: RequestQuery): RequestQuery {
+  switch (query.kind) {
+    case 'createNote':
+      return { kind: 'createNote', body: '' };
+    case 'appendToNote':
+      return { ...query, text: '' };
+    case 'updateNote':
+      return { ...query, body: '' };
+    default:
+      return query;
+  }
+}
 
 export type MailboxOptions = {
   ttlMs: number; // queued and unanswered requests expire after this
@@ -113,6 +176,9 @@ export type MailboxOptions = {
   dedupeWindowMs: number; // an identical open query from the same agent within this re-attaches
   pageTtlMs: number; // a page the phone sent ahead is dropped this long after it arrived
   settledBytesMax: number; // answer text and files a tenant keeps for collection; the oldest settled answers go first
+  queuedTtlMs: number; // a note write queued while the phone is offline expires after this
+  queuedWritesMax: number; // queued writes a tenant holds at once; past it a write is refused
+  queuedBytesMax: number; // UTF-16 units of note content the queued writes of a tenant hold at once; past it a write is refused
 };
 
 export const DEFAULT_MAILBOX_OPTIONS: MailboxOptions = {
@@ -126,6 +192,9 @@ export const DEFAULT_MAILBOX_OPTIONS: MailboxOptions = {
   dedupeWindowMs: 10 * 60_000,
   pageTtlMs: 24 * 60 * 60_000,
   settledBytesMax: 32 * 1024 * 1024,
+  queuedTtlMs: 7 * 24 * 60 * 60_000,
+  queuedWritesMax: 200,
+  queuedBytesMax: 4 * 1024 * 1024,
 };
 
 export class MailboxFull extends Error {
@@ -137,6 +206,16 @@ export class MailboxFull extends Error {
 export class TooManyRequests extends Error {
   constructor(readonly perMinute: number) {
     super(`agent made more than ${perMinute} new requests in a minute`);
+  }
+}
+
+/** The phone is offline and the tenant's offline write changelog is at a cap; the write is refused, not queued. */
+export class OfflineQueueFull extends Error {
+  constructor(
+    readonly cap: 'writes' | 'bytes',
+    readonly limit: number,
+  ) {
+    super(`offline write queue holds at most ${limit} ${cap}`);
   }
 }
 
@@ -186,9 +265,18 @@ export function toolStatus(request: RelayRequest, presence: DevicePresence): Too
     }
     case 'queued':
     case 'withPhone':
-      return presence.online
-        ? { requestId, status: 'processing' }
-        : { requestId, status: 'phone_offline', lastSeenAt: presence.lastSeenAt };
+      if (presence.online) return { requestId, status: 'processing' };
+      if (request.queuedAt !== null && isWrite(request.query)) {
+        return {
+          requestId,
+          status: 'queued',
+          of: request.query.kind,
+          queuedAt: request.queuedAt,
+          keptUntil: request.expiresAt,
+          noteId: request.noteId,
+        };
+      }
+      return { requestId, status: 'phone_offline', lastSeenAt: presence.lastSeenAt };
   }
 }
 
@@ -279,8 +367,9 @@ export class Mailbox {
   /**
    * Creates the request, or re-attaches to an identical open one, and waits until it settles, the
    * wait budget ends, or the phone stays offline past the grace period. Aborting stops waiting but keeps
-   * the request. Throws MailboxFull when the agent already has maxOpenPerAgent open requests, and
-   * TooManyRequests past newPerMinute new requests.
+   * the request. A note write while the phone is offline goes into the offline write changelog instead (queuedAt).
+   * Throws MailboxFull when the agent already has maxOpenPerAgent open requests besides queued writes,
+   * OfflineQueueFull when a write would pass the tenant's queue caps, and TooManyRequests past newPerMinute new requests.
    */
   ask(agentId: AgentId, query: RequestQuery, waitMs: number, signal: AbortSignal): Promise<ToolOutcome> {
     this.sweep();
@@ -288,7 +377,10 @@ export class Mailbox {
     const open = [...this.requests.values()].filter((r) => r.agentId === agentId && r.state.kind !== 'settled');
     const retry = open.find((r) => isDeepStrictEqual(r.query, query) && now - r.askedAt < this.options.dedupeWindowMs);
     if (retry) return this.wait(retry, waitMs, signal);
-    if (open.length >= this.options.maxOpenPerAgent) throw new MailboxFull(open.length);
+    const queues = isWrite(query) && !this.presence().online;
+    if (queues) this.checkQueueRoom(query);
+    const counted = open.filter((r) => r.queuedAt === null).length;
+    if (!queues && counted >= this.options.maxOpenPerAgent) throw new MailboxFull(counted);
     if (!this.newRequests.take(agentId)) throw new TooManyRequests(this.options.newPerMinute);
 
     const request: RelayRequest = {
@@ -296,7 +388,9 @@ export class Mailbox {
       agentId,
       query,
       askedAt: now,
-      expiresAt: now + this.options.ttlMs,
+      expiresAt: now + (queues ? this.options.queuedTtlMs : this.options.ttlMs),
+      queuedAt: queues ? now : null,
+      noteId: queues && query.kind === 'createNote' ? mintNoteId() : null,
       state: { kind: 'queued' },
     };
     this.requests.set(request.id, request);
@@ -359,6 +453,13 @@ export class Mailbox {
     this.changed();
   }
 
+  /** Open writes in the offline write changelog. A tenant holding any is not evicted while they live. */
+  queuedWrites(): number {
+    let count = 0;
+    for (const request of this.requests.values()) if (request.queuedAt !== null && request.state.kind !== 'settled') count++;
+    return count;
+  }
+
   presence(): DevicePresence {
     const recent = this.lastSeenAt !== null && Date.now() - this.lastSeenAt < this.options.offlineAfterMs;
     return { online: this.parkedTurn !== null || recent, lastSeenAt: this.lastSeenAt };
@@ -389,7 +490,40 @@ export class Mailbox {
     return { id: request.id, kind: outcome.kind };
   }
 
+  /** Throws OfflineQueueFull when one more write of this content would pass a cap. */
+  private checkQueueRoom(query: RequestQuery): void {
+    let writes = 0;
+    let bytes = queuedBytes(query);
+    for (const request of this.requests.values()) {
+      if (request.queuedAt === null || request.state.kind === 'settled') continue;
+      writes++;
+      bytes += queuedBytes(request.query);
+    }
+    if (writes >= this.options.queuedWritesMax) throw new OfflineQueueFull('writes', this.options.queuedWritesMax);
+    if (bytes > this.options.queuedBytesMax) throw new OfflineQueueFull('bytes', this.options.queuedBytesMax);
+  }
+
+  /**
+   * A write asked while the phone was online that is still open once it went offline joins the changelog, with its
+   * longer life, when the caps have room. Otherwise it stays a phone_offline request.
+   */
+  private enqueue(request: RelayRequest): void {
+    if (request.queuedAt !== null || request.state.kind === 'settled' || !isWrite(request.query)) return;
+    try {
+      this.checkQueueRoom(request.query);
+    } catch (error) {
+      if (error instanceof OfflineQueueFull) return;
+      throw error;
+    }
+    const now = Date.now();
+    request.queuedAt = now;
+    request.expiresAt = Math.max(request.expiresAt, now + this.options.queuedTtlMs);
+    if (request.query.kind === 'createNote') request.noteId = request.state.kind === 'queued' ? mintNoteId() : liveNoteId(request.id);
+  }
+
   private settle(request: RelayRequest, outcome: Settlement): void {
+    // The changelog drops a write's content once the phone answered it or it expired.
+    if (request.queuedAt !== null) request.query = withoutContent(request.query);
     const bytes = heldBytes(outcome);
     request.state = { kind: 'settled', at: Date.now(), outcome, bytes };
     if (outcome.kind === 'changes') this.readCursors.set(request.agentId, outcome.page.nextCursor);
@@ -442,12 +576,15 @@ export class Mailbox {
       }
       if (request.state.kind === 'queued') request.state = { kind: 'withPhone', since: now };
       if (request.state.kind !== 'withPhone') continue;
+      const { queuedAt, noteId } = request;
       handed.push({
         id: request.id,
         agentId: request.agentId,
         askedAt: wireTime(request.askedAt),
         expiresAt: wireTime(request.expiresAt),
         ...request.query,
+        ...(queuedAt === null ? {} : { queued: true, queuedAt: wireTime(queuedAt) }),
+        ...(noteId === null ? {} : { noteId }),
       });
     }
     if (refused) this.changed();
@@ -474,9 +611,13 @@ export class Mailbox {
       for (;;) {
         this.sweep();
         const presence = this.presence();
-        if (!presence.online) this.answerFromPage(request);
+        if (!presence.online) {
+          this.answerFromPage(request);
+          this.enqueue(request);
+        }
         const status = toolStatus(request, presence);
-        const budget = !parks ? 0 : status.status === 'phone_offline' ? Math.min(waitMs, this.options.offlineGraceMs) : waitMs;
+        const away = status.status === 'phone_offline' || status.status === 'queued';
+        const budget = !parks ? 0 : away ? Math.min(waitMs, this.options.offlineGraceMs) : waitMs;
         const elapsed = Date.now() - start;
         if (request.state.kind === 'settled' || signal.aborted || elapsed >= budget) return status;
         await this.nextChange(budget - elapsed, signal);

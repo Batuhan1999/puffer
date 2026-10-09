@@ -8,7 +8,9 @@ COPY tsconfig.json ./
 COPY src ./src
 RUN mkdir -p /data && chown node:node /data
 
-ENV HOST=0.0.0.0 PORT=8080 PUFFER_STATE=/data/registry.json
+# NODE_ENV=production: the relay requires BETTER_AUTH_SECRET (`fly secrets set`) and refuses dev-only flags. Accounts
+# live in /data/auth.db, next to registry.json on the volume.
+ENV NODE_ENV=production HOST=0.0.0.0 PORT=8080 PUFFER_STATE=/data/registry.json
 EXPOSE 8080
 # Starts as root only to hand the volume to the unprivileged node user (Fly mounts a new volume owned by root),
 # then runs the relay as node.

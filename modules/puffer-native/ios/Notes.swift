@@ -138,11 +138,15 @@ actor NoteBook {
     case missing
   }
 
-  /// An agent write's outcome is kept this long under its request id. A request settles within a day.
-  static let keepApplied: TimeInterval = 2 * 24 * 60 * 60
+  // Unverified (cloud): validate on the Mac
+  /// An agent write's outcome is kept this long under its request id. A live request settles within a day; a write the
+  /// relay queued while this phone was offline lives 7 days there, so its replay must still find its outcome.
+  static let keepApplied: TimeInterval = 8 * 24 * 60 * 60
 
-  /// `applied` holds the outcome of each agent write by request id (`applying`).
-  private typealias Tables = (notes: DocumentTable, folders: DocumentTable, applied: DocumentTable)
+  // Unverified (cloud): validate on the Mac
+  /// `applied` holds the outcome of each agent write by request id (`applying`). `bases` holds the bodies agents were
+  /// handed, by note and version, for merging a queued update written against one (`base(of:version:)`).
+  private typealias Tables = (notes: DocumentTable, folders: DocumentTable, applied: DocumentTable, bases: DocumentTable)
   private var tables: Tables?
   private var notes: [NoteID: Note] = [:]
   private var folders: [NoteFolderID: NoteFolder] = [:]
@@ -151,11 +155,12 @@ actor NoteBook {
   /// Apple Notes source kept as files into the store.
   func open() throws {
     if tables != nil { return }
-    let db = try SQLiteDB(url: Self.storeURL, schema: ["notes", "folders", "applied"].map(DocumentTable.schema).joined())
+    let db = try SQLiteDB(url: Self.storeURL, schema: ["notes", "folders", "applied", "bases"].map(DocumentTable.schema).joined())
     let opened: Tables = (
       notes: DocumentTable(db: db, name: "notes"), folders: DocumentTable(db: db, name: "folders"),
-      applied: DocumentTable(db: db, name: "applied"))
+      applied: DocumentTable(db: db, name: "applied"), bases: DocumentTable(db: db, name: "bases"))
     try opened.applied.delete(before: Date().addingTimeInterval(-Self.keepApplied).timeIntervalSince1970)
+    try opened.bases.delete(before: Date().addingTimeInterval(-Self.keepApplied).timeIntervalSince1970)
     try reload(from: opened)
     tables = opened
     if folders[Self.notesFolder] == nil {
@@ -352,6 +357,23 @@ actor NoteBook {
       try tables?.applied.put(request.rawValue, outcome, position: Date().timeIntervalSince1970)
     }
     return outcome
+  }
+
+  // Unverified (cloud): validate on the Mac
+  /// Keeps the note's current body under its version: an agent was just handed it, and may write a queued update
+  /// against that version while this phone is offline. Kept as long as applied outcomes.
+  func rememberBase(_ id: NoteID) throws {
+    try open()
+    guard let note = notes[id] else { return }
+    try tables?.bases.put("\(id.rawValue)#\(note.version)", note.body, position: Date().timeIntervalSince1970)
+  }
+
+  // Unverified (cloud): validate on the Mac
+  /// The body the note had at `version`, when an agent was handed it then.
+  func base(of id: NoteID, version: Int) throws -> String? {
+    try open()
+    if notes[id]?.version == version { return notes[id]?.body }
+    return try tables?.bases.get(String.self, id: "\(id.rawValue)#\(version)")
   }
 
   /// One transaction for the whole list, so a Shortcut can hand over thousands of notes at once. A note seen before

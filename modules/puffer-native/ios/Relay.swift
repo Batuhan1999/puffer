@@ -41,10 +41,13 @@ struct WireRequest: Decodable, Sendable {
   let query: Query
   let askedAt: Date
   let expiresAt: Date
+  // Unverified (cloud): validate on the Mac
+  /// Set on a note write the relay queued while this phone was offline (design/notes/CONTRACT.md section 3a).
+  let queued: QueuedWrite?
 
   private enum Keys: String, CodingKey {
     case id, agentId, kind, question, broaden, filters, sort, includeDocuments, since, limit, askedAt, expiresAt
-    case query, folder, noteId, title, body, text, baseVersion
+    case query, folder, noteId, title, body, text, baseVersion, queued, queuedAt
   }
 
   /// The relay validated the shape. A value this phone cannot read is dropped rather than failing the whole sync.
@@ -74,6 +77,10 @@ struct WireRequest: Decodable, Sendable {
     expiresAt = try c.decode(Date.self, forKey: .expiresAt)
     let filters = (try? c.decodeIfPresent(Filters.self, forKey: .filters))?.parsed
     let documents = (try? c.decodeIfPresent(String.self, forKey: .includeDocuments)).flatMap(Extent.init(rawValue:)) ?? .excerpt
+    // Unverified (cloud): validate on the Mac
+    // `noteId` on a create is the id the relay minted for a queued create; on the other note kinds it names the note.
+    let isQueued = (try? c.decodeIfPresent(Bool.self, forKey: .queued)) == true
+    let queuedAt: Date? = isQueued ? ((try? c.decodeIfPresent(Date.self, forKey: .queuedAt)) ?? askedAt) : nil
     switch try c.decodeIfPresent(String.self, forKey: .kind) ?? "ask" {
     case "ask":
       let newest = (try? c.decodeIfPresent(String.self, forKey: .sort)) == "recent"
@@ -110,6 +117,14 @@ struct WireRequest: Decodable, Sendable {
       query = .note(.delete(try c.decode(NoteID.self, forKey: .noteId)))
     case let other:
       throw DecodingError.dataCorruptedError(forKey: .kind, in: c, debugDescription: "unknown request kind \(other)")
+    }
+    // Unverified (cloud): validate on the Mac
+    if let queuedAt, case let .note(note) = query, note.writes {
+      var minted: NoteID?
+      if case .create = note { minted = try? c.decodeIfPresent(NoteID.self, forKey: .noteId) }
+      queued = QueuedWrite(at: queuedAt, noteID: minted)
+    } else {
+      queued = nil
     }
   }
 }
@@ -430,6 +445,16 @@ private struct ConfirmBody: Encodable {
   let link: String
 }
 
+// Unverified (cloud): validate on the Mac
+private struct VersionBody: Encodable {
+  let v: Int
+}
+
+// Unverified (cloud): validate on the Mac
+private struct Deleted: Decodable {
+  let deleted: Bool
+}
+
 enum RelayFailure: Error, LocalizedError, Sendable {
   case unreachable(String)
   /// The device key was rejected: the user pairs again.
@@ -480,9 +505,32 @@ struct RelayClient: Sendable {
     }
   }
 
-  /// POST /v1/device/register on `relay`, no auth: a new tenant and its device key.
-  static func register(_ relay: URL) async throws -> PairingLink {
-    var post = Self.request(relay, "v1/device/register", key: nil, timeout: 15)
+  // Unverified (cloud): validate on the Mac
+  /// POST /v1/device/rotate: a new device key for this device on the same relay. The old key stops working the moment
+  /// the relay answers, so the caller stores the returned link before anything else uses the key.
+  func rotateDeviceKey() async throws -> PairingLink {
+    let rotated: Registration = try await post("v1/device/rotate", VersionBody(v: Self.protocolVersion), timeout: 15)
+    return PairingLink(relay: link.relay, deviceKey: rotated.deviceKey)
+  }
+
+  // Unverified (cloud): validate on the Mac
+  /// DELETE /v1/device: the relay deletes this device and everything it holds for it (agent keys, queued requests,
+  /// webhooks). A 401 means the relay no longer knows the key, which is the same outcome.
+  func deleteDevice() async throws {
+    var request = Self.request(link.relay, "v1/device", key: link.deviceKey, timeout: 15)
+    request.httpMethod = "DELETE"
+    do {
+      let _: Deleted = try await Self.send(request)
+    } catch RelayFailure.unauthorized {
+      return
+    }
+  }
+
+  // Unverified (cloud): validate on the Mac
+  /// POST /v1/device/register on `relay` with the signed-in account's session token as the bearer: a new tenant, owned
+  /// by that account, and its device key. A 401 means the session is gone or expired: the user signs in again.
+  static func register(_ relay: URL, session: String) async throws -> PairingLink {
+    var post = Self.request(relay, "v1/device/register", key: session, timeout: 15)
     post.httpMethod = "POST"
     post.setValue("application/json", forHTTPHeaderField: "Content-Type")
     post.httpBody = Data(#"{"v":1}"#.utf8)
@@ -577,6 +625,25 @@ enum Keychain {
     guard status == errSecSuccess || status == errSecItemNotFound else {
       throw PufferError.storeFailed("Keychain delete failed (\(status))")
     }
+  }
+}
+
+// Unverified (cloud): validate on the Mac
+/// The relay account's session token (Better Auth), handed over by the JS client after sign-in. Used only to register.
+enum RelaySessionKeychain {
+  private static let service = "dev.local.puffer.relay"
+  private static let account = "session"
+
+  static func save(_ token: String) throws {
+    try Keychain.save(Data(token.utf8), service: service, account: account)
+  }
+
+  static func load() -> String? {
+    Keychain.load(service: service, account: account).map { String(decoding: $0, as: UTF8.self) }
+  }
+
+  static func delete() throws {
+    try Keychain.delete(service: service, account: account)
   }
 }
 

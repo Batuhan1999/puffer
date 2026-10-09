@@ -99,10 +99,14 @@ export type AgentRequest = {
   writes: boolean;
   /** The relay acknowledged the current phase. */
   delivered: boolean;
+  /** A note write an agent made while the phone was offline: when the relay queued it (ms). Null for every other request. */
+  queuedAt: number | null;
 };
 
 export type RelayStatus =
   | { kind: 'unpaired' }
+  /** No relay yet and no account session: Puffer registers with the relay once the user signs in. */
+  | { kind: 'signedOut' }
   | { kind: 'paired'; url: string; lastContact: number | null; lastError: string | null };
 
 /**
@@ -177,6 +181,11 @@ declare class PufferNativeModule extends NativeModule<{
   declineConnect(connectId: string): Promise<void>;
   pair(link: string): Promise<void>;
   unpair(): Promise<void>;
+  /** A new device key from the relay; the old one stops working at once. Agents stay connected. */
+  rotateDeviceKey(): Promise<void>;
+  /** Deletes this iPhone's data on the relay, then forgets the relay and removes every agent here. */
+  deleteRelayData(): Promise<void>;
+  setRelaySession(token: string | null): Promise<void>;
   pickFolder(): Promise<Folder | null>;
   listFolders(): Promise<Folder[]>;
   removeFolder(id: string): Promise<void>;
@@ -234,6 +243,13 @@ export const bridge = {
   declineConnect: (connectId: string) => module().declineConnect(connectId),
   pair: (link: string) => module().pair(link),
   unpair: () => module().unpair(),
+  rotateDeviceKey: () => module().rotateDeviceKey(),
+  deleteRelayData: () => module().deleteRelayData(),
+  /**
+   * The signed-in account's session token (src/auth.ts), or null on sign-out. Native keeps it in the Keychain and sends it
+   * as `Authorization: Bearer` to register this iPhone; without it Puffer does not register. Same token again: no-op.
+   */
+  setRelaySession: (token: string | null) => module().setRelaySession(token),
 };
 
 export const folders = {

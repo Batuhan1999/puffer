@@ -10,6 +10,7 @@ import {
   onChange,
   type PendingConnect,
 } from '../modules/puffer-native/src';
+import { useRelaySessionHandoff } from './auth';
 import { errorText } from './store';
 
 export type {
@@ -26,6 +27,8 @@ type BridgeView = BridgeSnapshot & {
   disconnect(agentId: string): Promise<void>;
   pair(link: string): Promise<void>;
   unpair(): Promise<void>;
+  rotateDeviceKey(): Promise<void>;
+  deleteRelayData(): Promise<void>;
   approveConnect(connect: PendingConnect): Promise<string>;
   openConnectLink(connectId: string, secret: string): Promise<void>;
   declineConnect(connectId: string): Promise<void>;
@@ -37,6 +40,7 @@ const BridgeContext = createContext<BridgeView | null>(null);
 /** Refetches on every change except item writes. */
 export function BridgeProvider({ children }: { children: ReactNode }) {
   const [snapshot, setSnapshot] = useState<BridgeSnapshot | null>(null);
+  useRelaySessionHandoff();
 
   useEffect(() => {
     let alive = true;
@@ -59,6 +63,8 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
     disconnect: bridge.disconnect,
     pair: bridge.pair,
     unpair: bridge.unpair,
+    rotateDeviceKey: bridge.rotateDeviceKey,
+    deleteRelayData: bridge.deleteRelayData,
     approveConnect: bridge.approveConnect,
     openConnectLink: bridge.openConnectLink,
     declineConnect: bridge.declineConnect,

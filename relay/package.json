@@ -7,12 +7,14 @@
   },
   "scripts": {
     "relay": "tsx src/server.ts",
-    "e2e": "tsx scripts/e2e.ts",
+    "e2e": "PUFFER_OPEN_REGISTER=1 tsx scripts/e2e.ts",
+    "e2e:auth": "tsx scripts/e2e-auth.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@modelcontextprotocol/node": "^2.1.1",
     "@modelcontextprotocol/server": "^2.3.1",
+    "better-auth": "1.7.6",
     "qrcode": "^1.5.4",
     "tsx": "^4.23.15",
     "zod": "^4.6.5"

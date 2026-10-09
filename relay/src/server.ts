@@ -13,7 +13,15 @@
 //   GET  /start            no auth           -> http.startDocument: how an agent connects by message and uses the API
 //   POST /v1/connect, POST /v1/connect/<id>/token  no auth / poll token -> oauth.linkConnect, oauth.linkToken
 //   GET  /c/<secret>       no auth           -> a page that opens Puffer's approval for that connection
-//   POST /v1/device/register  no auth, per caller -> tenants.register: a new tenant and its dk_ key
+//   /api/auth/*            Better Auth (accounts.ts): sign up / sign in (email+password, Apple when configured),
+//                                               sessions as Bearer tokens, /api/auth/admin/* user management by role
+//   POST /v1/device/register  account session (Bearer), per caller and per user -> tenants.register: a new tenant owned
+//                                               by the user and its dk_ key; open only with --dev-open-register
+//   GET  /v1/device        device bearer key -> tenants.summary: the device's own account, no content
+//   DELETE /v1/device      device bearer key -> tenants.delete + oauth.forgetTenant: the tenant and all it holds
+//   POST /v1/device/rotate device bearer key -> tenants.rotateDeviceKey: a new dk_ key, the old one 401 at once
+//   GET  /v1/admin/devices, DELETE /v1/admin/devices/<tenant id>, GET /v1/admin/stats  session of an admin account ->
+//                                               the operator's view: summaries without content, with each owner
 //   POST /v1/device/sync   device bearer key -> protocol.parseSyncBody -> tenants.synced -> tenants.applyRegistry
 //                                               -> notifier.setWebhooks -> notifier.recordHeads -> mailbox.replacePages
 //                                               -> oauth.decline/approve -> mailbox.sync -> oauth.revokedKeys
@@ -44,13 +52,14 @@ import {
   validateOriginHeader,
 } from '@modelcontextprotocol/server';
 
+import { AUTH_BASE_PATH, CLIENT_IP_HEADER, openAccounts, type Accounts, type SignedIn } from './accounts';
 import { openApiDocument, serveAgentApi, startDocument } from './http';
 import { RateLimit, callerKey } from './limits';
 import { DEFAULT_MAILBOX_OPTIONS } from './mailbox';
 import { createAgentServer } from './mcp';
 import { AuthServer, DEFAULT_CONNECT_TTL_MS } from './oauth';
-import { ConfirmBody, ConnectId, PROTOCOL_VERSION, RequestId, parseSyncBody, type AgentId, type SyncResponse } from './protocol';
-import { Tenants, type Tenant } from './registry';
+import { ConfirmBody, ConnectId, PROTOCOL_VERSION, RequestId, parseSyncBody, wireTime, type AgentId, type SyncResponse } from './protocol';
+import { TenantId, Tenants, type Tenant, type TenantSummary } from './registry';
 
 // Claude Code times each HTTP MCP request to the server's first response byte at 60 s by default
 // (code.claude.com/docs/en/mcp), and a JSON-mode tool result sends its first byte only when it is done.
@@ -71,6 +80,12 @@ const SWEEP_EVERY_MS = 30_000;
 /** Self-registration per caller address. Each registration is a tenant on disk until the relay's operator removes it. */
 const REGISTRATIONS = { perCaller: 5, windowMs: 60 * 60_000 };
 const DEFAULT_MAX_DEVICES = 1_000;
+/** Devices one account may own; registering another answers 403 device_limit. */
+const DEFAULT_MAX_DEVICES_PER_USER = 5;
+/** Failed admin authentications (no session, or not an admin) per caller address; past it the caller gets 429. */
+const ADMIN_FAILURES = { perCaller: 10, windowMs: 15 * 60_000 };
+/** Sign-up and sign-in bodies are small JSON objects. */
+const MAX_AUTH_BODY_BYTES = 64 * 1024;
 /**
  * Node's requestTimeout runs only until the request is fully received, so the 25 s device long-poll and the 50 s MCP
  * wait are not cut short by it; it bounds uploads, including the wait for a turn to send a large sync body. A sync body
@@ -106,9 +121,21 @@ type Config = {
   devCallbacks: boolean;
   notifyDebounceMs: number;
   offlineAfterMs: number;
+  /** The offline write changelog (mailbox.ts): how long a queued write lives, and a tenant's caps in writes and characters. */
+  queuedTtlMs: number;
+  queuedWritesMax: number;
+  queuedBytesMax: number;
   connectTtlMs: number;
   /** Devices (tenants) the relay holds at most; self-registration answers 503 beyond it. */
   maxDevices: number;
+  maxDevicesPerUser: number;
+  /** NODE_ENV=production: BETTER_AUTH_SECRET is required and dev-only flags are refused. */
+  production: boolean;
+  /**
+   * --dev-open-register or PUFFER_OPEN_REGISTER=1, dev and tests only: POST /v1/device/register works without a session
+   * (a session, when sent, still owns the device). Refused in production.
+   */
+  openRegister: boolean;
 };
 
 function integer(name: string, raw: string, max = Number.MAX_SAFE_INTEGER): number {
@@ -138,10 +165,19 @@ function config(argv: string[], env: NodeJS.ProcessEnv): Config {
       'dev-callbacks': { type: 'boolean' },
       'notify-debounce-ms': { type: 'string' },
       'offline-after-ms': { type: 'string' },
+      'queued-ttl-ms': { type: 'string' },
+      'queued-writes-max': { type: 'string' },
+      'queued-bytes-max': { type: 'string' },
       'connect-ttl-ms': { type: 'string' },
       'max-devices': { type: 'string' },
+      'max-devices-per-user': { type: 'string' },
+      'dev-open-register': { type: 'boolean' },
     },
   });
+  const production = env.NODE_ENV === 'production';
+  const openRegister = values['dev-open-register'] ?? env.PUFFER_OPEN_REGISTER === '1';
+  if (production && openRegister) throw new Error('--dev-open-register (PUFFER_OPEN_REGISTER) is for development only, not with NODE_ENV=production');
+  if (env.PUFFER_ADMIN_TOKEN) console.warn('PUFFER_ADMIN_TOKEN is no longer used: /v1/admin takes the session of an admin account (README, Accounts).');
   const publicUrl = values['public-url'] ?? env.PUFFER_PUBLIC_URL;
   if (![undefined, '', 'fly'].includes(env.PUFFER_TRUST_PROXY)) throw new Error(`PUFFER_TRUST_PROXY must be fly or unset, got ${env.PUFFER_TRUST_PROXY}`);
   return {
@@ -154,8 +190,14 @@ function config(argv: string[], env: NodeJS.ProcessEnv): Config {
     devCallbacks: values['dev-callbacks'] ?? env.PUFFER_DEV_CALLBACKS === '1',
     notifyDebounceMs: integer('--notify-debounce-ms', values['notify-debounce-ms'] ?? env.PUFFER_NOTIFY_DEBOUNCE_MS ?? '3000'),
     offlineAfterMs: integer('--offline-after-ms', values['offline-after-ms'] ?? String(DEFAULT_MAILBOX_OPTIONS.offlineAfterMs)),
+    queuedTtlMs: integer('--queued-ttl-ms', values['queued-ttl-ms'] ?? env.PUFFER_QUEUED_TTL_MS ?? String(DEFAULT_MAILBOX_OPTIONS.queuedTtlMs)),
+    queuedWritesMax: integer('--queued-writes-max', values['queued-writes-max'] ?? env.PUFFER_QUEUED_WRITES_MAX ?? String(DEFAULT_MAILBOX_OPTIONS.queuedWritesMax)),
+    queuedBytesMax: integer('--queued-bytes-max', values['queued-bytes-max'] ?? env.PUFFER_QUEUED_BYTES_MAX ?? String(DEFAULT_MAILBOX_OPTIONS.queuedBytesMax)),
     connectTtlMs: integer('--connect-ttl-ms', values['connect-ttl-ms'] ?? String(DEFAULT_CONNECT_TTL_MS)),
     maxDevices: integer('--max-devices', values['max-devices'] ?? env.PUFFER_MAX_DEVICES ?? String(DEFAULT_MAX_DEVICES)),
+    maxDevicesPerUser: integer('--max-devices-per-user', values['max-devices-per-user'] ?? env.PUFFER_MAX_DEVICES_PER_USER ?? String(DEFAULT_MAX_DEVICES_PER_USER)),
+    production,
+    openRegister,
   };
 }
 
@@ -252,18 +294,49 @@ function sendOpenPage(res: ServerResponse, status: number, target: string | null
   );
 }
 
+/** What GET /v1/device and the admin routes send of a tenant: no content and no key digests. */
+function accountJson(summary: TenantSummary) {
+  return {
+    deviceId: summary.id,
+    registeredAt: wireTime(summary.registeredAt),
+    lastSyncAt: summary.lastSyncAt === null ? null : wireTime(summary.lastSyncAt),
+    lifecycle: summary.lifecycle,
+    agentCount: summary.agents.length,
+    online: summary.online,
+    queuedWrites: summary.queuedWrites,
+  };
+}
+
 async function main(): Promise<void> {
-  const { host, trustFlyClientIp, port, statePath, publicUrl, waitMs, devCallbacks, notifyDebounceMs, offlineAfterMs, connectTtlMs, maxDevices } =
-    config(process.argv.slice(2), process.env);
+  const {
+    host,
+    trustFlyClientIp,
+    port,
+    statePath,
+    publicUrl,
+    waitMs,
+    devCallbacks,
+    notifyDebounceMs,
+    offlineAfterMs,
+    queuedTtlMs,
+    queuedWritesMax,
+    queuedBytesMax,
+    connectTtlMs,
+    maxDevices,
+    maxDevicesPerUser,
+    production,
+    openRegister,
+  } = config(process.argv.slice(2), process.env);
   let base = publicUrl ?? '';
   const tenants = Tenants.open({
     path: statePath,
-    mailbox: { ...DEFAULT_MAILBOX_OPTIONS, offlineAfterMs },
+    mailbox: { ...DEFAULT_MAILBOX_OPTIONS, offlineAfterMs, queuedTtlMs, queuedWritesMax, queuedBytesMax },
     notifier: { debounceMs: notifyDebounceMs, allowLoopback: devCallbacks },
     openUrl: (id) => `${base}/open/${id}`,
   });
   const largeSyncs = new Turnstile();
   const registrations = new RateLimit<string>(REGISTRATIONS.perCaller, REGISTRATIONS.windowMs);
+  const adminFailures = new RateLimit<string>(ADMIN_FAILURES.perCaller, ADMIN_FAILURES.windowMs);
   const oauth = new AuthServer({
     issuer: () => base,
     clientsPath: join(dirname(statePath), 'oauth-clients.json'),
@@ -302,9 +375,22 @@ async function main(): Promise<void> {
     challenge: () => unknownAgent().headers.get('www-authenticate') ?? 'Bearer',
     readJson: (req: IncomingMessage, maxBytes: number) => readJson(req, maxBytes, TIMEOUTS.smallBodyMs),
   };
-  const callerOf = (req: IncomingMessage) => {
+  /** The caller's address: Fly-Client-IP behind Fly's proxy, else the socket's. */
+  const addressOf = (req: IncomingMessage) => {
     const forwarded = trustFlyClientIp ? req.headers['fly-client-ip'] : undefined;
-    return callerKey(typeof forwarded === 'string' && isIP(forwarded) ? forwarded : (req.socket.remoteAddress ?? 'unknown'));
+    return typeof forwarded === 'string' && isIP(forwarded) ? forwarded : (req.socket.remoteAddress ?? 'unknown');
+  };
+  const callerOf = (req: IncomingMessage) => callerKey(addressOf(req));
+  /** Opened once the relay listens, since Better Auth needs the public origin. Until then /api/auth answers 503. */
+  let accounts: Accounts | null = null;
+  /** A deleted account takes its devices with it, as DELETE /v1/device would. */
+  const deleteDevicesOf = (userId: string) => {
+    const owned = tenants.ofUser(userId);
+    for (const id of owned) {
+      tenants.delete(id);
+      oauth.forgetTenant(id);
+    }
+    if (owned.length) console.log(`accounts: deleted ${owned.length} device(s) of a removed user`);
   };
   // The SDK's localhost guards would refuse a hosted relay's own hostname.
   const allowedHosts = [...localhostAllowedHostnames(), ...(publicUrl ? [new URL(publicUrl).hostname] : [])];
@@ -314,6 +400,37 @@ async function main(): Promise<void> {
     if (!host.ok) return host;
     const origin = validateOriginHeader(req.headers.origin, allowedHosts);
     return origin.ok ? null : origin;
+  };
+
+  /** The account a request's session names (Authorization: Bearer <session token>), or null. */
+  const signedIn = async (req: IncomingMessage): Promise<SignedIn | null> => (accounts ? accounts.session(req.headers) : null);
+
+  /**
+   * /v1/admin: the session of an account whose role is admin (Better Auth admin plugin). No valid session is 401, a
+   * non-admin account 403; both count as failures, and a caller past ADMIN_FAILURES gets 429 before its session is
+   * looked at. False when a refusal was sent.
+   */
+  const admitAdmin = async (req: IncomingMessage, res: ServerResponse): Promise<boolean> => {
+    const caller = callerOf(req);
+    if (adminFailures.exhausted(caller)) {
+      sendJson(res, 429, { error: 'rate_limited', message: 'Too many failed admin attempts. Try again later.' }, {
+        ...NO_STORE,
+        'retry-after': String(ADMIN_FAILURES.windowMs / 1000),
+      });
+      return false;
+    }
+    const user = await signedIn(req);
+    if (user?.admin) return true;
+    adminFailures.take(caller);
+    if (user) {
+      sendJson(res, 403, { error: 'forbidden', message: 'This account is not an admin.' }, NO_STORE);
+      return false;
+    }
+    sendJson(res, 401, { error: 'invalid_token', message: 'Sign in with an admin account and send Authorization: Bearer <session token>.' }, {
+      ...NO_STORE,
+      'www-authenticate': 'Bearer realm="puffer-admin", error="invalid_token"',
+    });
+    return false;
   };
 
   async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -350,6 +467,23 @@ async function main(): Promise<void> {
       if (!serves(req, res, READ)) return;
       const id = oauth.linkTarget(approve[1]);
       return sendOpenPage(res, id ? 200 : 404, id ? `puffer://connect/${id}?link=${approve[1]}` : null);
+    }
+
+    // Better Auth checks the Origin itself, against its trusted origins (the app's puffer:// scheme among them), so this
+    // route takes only the Host guard.
+    if (path === AUTH_BASE_PATH || path.startsWith(`${AUTH_BASE_PATH}/`)) {
+      const host = validateHostHeader(req.headers.host, allowedHosts);
+      if (!host.ok) return sendJson(res, 403, { error: host.errorCode, message: host.message }, NO_STORE);
+      if (!accounts) return sendJson(res, 503, { error: 'starting', message: 'Accounts are starting. Try again.' }, NO_STORE);
+      const declared = Number(req.headers['content-length'] ?? 0);
+      const bodyless = req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS';
+      if (!bodyless && req.headers['content-length'] === undefined && req.headers['transfer-encoding'] !== undefined) {
+        return sendJson(res, 411, { error: 'length_required', message: 'Send a Content-Length.' }, { ...NO_STORE, connection: 'close' });
+      }
+      if (declared > MAX_AUTH_BODY_BYTES) throw new HttpError(413, 'body_too_large', `The body is larger than ${MAX_AUTH_BODY_BYTES} bytes.`);
+      // Better Auth keys its rate limits on this header; the caller's own value is replaced.
+      req.headers[CLIENT_IP_HEADER] = addressOf(req);
+      return accounts.handle(req, res);
     }
 
     // DNS-rebinding guards for the authenticated routes. The routes above them reveal nothing, and a platform
@@ -429,11 +563,91 @@ async function main(): Promise<void> {
           'retry-after': String(REGISTRATIONS.windowMs / 1000),
         });
       }
+      const user = await signedIn(req);
+      if (!user && !openRegister) {
+        return sendJson(res, 401, { error: 'sign_in_required', message: 'Sign in to Puffer and send Authorization: Bearer <session token>.' }, {
+          ...NO_STORE,
+          'www-authenticate': 'Bearer realm="puffer", error="invalid_token"',
+        });
+      }
+      if (user && tenants.ofUser(user.userId).length >= maxDevicesPerUser) {
+        return sendJson(res, 403, { error: 'device_limit', message: `This account already has ${maxDevicesPerUser} devices. Delete one first.` }, NO_STORE);
+      }
       if (tenants.activeCount() >= maxDevices) {
         return sendJson(res, 503, { error: 'capacity', message: 'This relay holds as many devices as it can. Try again later.' }, NO_STORE);
       }
-      const { id, deviceKey } = tenants.register();
+      const { id, deviceKey } = tenants.register(user?.userId);
       return sendJson(res, 200, { v: PROTOCOL_VERSION, deviceId: id, deviceKey }, NO_STORE);
+    }
+
+    if (path === '/v1/device') {
+      if (!serves(req, res, ['GET', 'DELETE'])) return;
+      const tenant = tenants.device(req.headers.authorization);
+      if (!tenant) return refuseDevice(res);
+      if (req.method === 'DELETE') {
+        tenants.delete(tenant.id);
+        oauth.forgetTenant(tenant.id);
+        return sendJson(res, 200, { v: PROTOCOL_VERSION, deleted: true }, NO_STORE);
+      }
+      const summary = tenants.summary(tenant.id);
+      if (!summary) return refuseDevice(res);
+      return sendJson(res, 200, { v: PROTOCOL_VERSION, ...accountJson(summary) }, NO_STORE);
+    }
+
+    if (path === '/v1/device/rotate') {
+      if (!serves(req, res, WRITE)) return;
+      await readBody(req, MAX_CONFIRM_BODY_BYTES, TIMEOUTS.smallBodyMs);
+      const tenant = tenants.device(req.headers.authorization);
+      if (!tenant) return refuseDevice(res);
+      return sendJson(res, 200, { v: PROTOCOL_VERSION, deviceId: tenant.id, deviceKey: tenants.rotateDeviceKey(tenant) }, NO_STORE);
+    }
+
+    // The operator's routes, for admin accounts.
+    if (path === '/v1/admin' || path.startsWith('/v1/admin/')) {
+      if (!(await admitAdmin(req, res))) return;
+      if (path === '/v1/admin/devices') {
+        if (!serves(req, res, READ)) return;
+        const summaries = tenants.summaries();
+        const emails = accounts?.emails(summaries.flatMap((summary) => (summary.userId ? [summary.userId] : []))) ?? new Map<string, string>();
+        const devices = summaries.map((summary) => ({
+          ...accountJson(summary),
+          agents: summary.agents,
+          userId: summary.userId,
+          email: summary.userId ? (emails.get(summary.userId) ?? null) : null,
+        }));
+        return sendJson(res, 200, { v: PROTOCOL_VERSION, devices }, NO_STORE);
+      }
+      const device = /^\/v1\/admin\/devices\/([^/]*)$/.exec(path);
+      if (device) {
+        if (!serves(req, res, ['DELETE'])) return;
+        const id = TenantId.safeParse(device[1]);
+        if (!id.success || !tenants.delete(id.data)) return sendJson(res, 404, { error: 'not_found', message: 'No such device.' }, NO_STORE);
+        oauth.forgetTenant(id.data);
+        return sendJson(res, 200, { v: PROTOCOL_VERSION, deleted: true }, NO_STORE);
+      }
+      if (path === '/v1/admin/stats') {
+        if (!serves(req, res, READ)) return;
+        const summaries = tenants.summaries();
+        const lifecycles = { pending: 0, active: 0, idle: 0, prune: 0 };
+        for (const { lifecycle } of summaries) lifecycles[lifecycle]++;
+        return sendJson(
+          res,
+          200,
+          {
+            v: PROTOCOL_VERSION,
+            devices: summaries.length,
+            ...lifecycles,
+            countedAgainstMax: tenants.activeCount(),
+            maxDevices,
+            users: accounts?.userCount() ?? 0,
+            online: summaries.filter((summary) => summary.online).length,
+            agents: summaries.reduce((sum, summary) => sum + summary.agents.length, 0),
+            queuedWrites: summaries.reduce((sum, summary) => sum + summary.queuedWrites, 0),
+          },
+          NO_STORE,
+        );
+      }
+      return sendJson(res, 404, { error: 'not_found', message: 'No such path.' }, NO_STORE);
     }
 
     const byLink = /^\/v1\/device\/connects\/by-link\/([^/]*)$/.exec(path);
@@ -537,12 +751,16 @@ async function main(): Promise<void> {
   const address = server.address();
   if (address === null || typeof address === 'string') throw new Error('relay is not listening on a TCP port');
   base = publicUrl ?? `http://localhost:${address.port}`;
+  accounts = await openAccounts({ stateDir: dirname(statePath), baseURL: base, production, env: process.env, onUserDeleted: deleteDevicesOf });
   try {
     buildOAuthProtectedResourceMetadata(oauth.metadata());
   } catch (error) {
     throw new Error(`OAuth needs an https public URL (plain http only on localhost), got ${base}: ${String(error)}`);
   }
-  console.log(`${tenants.count} device(s) registered. Phones register themselves at POST /v1/device/register.`);
+  console.log(
+    `${tenants.count} device(s) registered. Signed-in phones register at POST /v1/device/register; accounts at ${base}${AUTH_BASE_PATH}.` +
+      (openRegister ? ' Registration is OPEN without sign-in (--dev-open-register).' : ''),
+  );
   console.log(`Puffer relay on ${base} (listening on ${host}:${address.port}, MCP at /mcp, wait budget ${waitMs} ms)`);
 }
 

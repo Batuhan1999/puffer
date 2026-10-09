@@ -139,6 +139,17 @@ export class Sessions {
     return [...this.sessions.values()].filter((s) => s.tenant === tenant && s.state.kind === 'revoked').map((s) => s.agent);
   }
 
+  /** The tenant was deleted: its sessions go at once, revoked ones too, since no phone is left to tell. */
+  forgetTenant(tenant: TenantId): void {
+    let changed = false;
+    for (const [id, session] of this.sessions) {
+      if (session.tenant !== tenant) continue;
+      this.sessions.delete(id);
+      changed = true;
+    }
+    if (changed) this.save();
+  }
+
   /**
    * An idle session expires revoked, so the phone removes its agent. A session whose agent the phone removed is
    * forgotten, and a revoked one after REVOKED_RETENTION_MS.

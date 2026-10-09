@@ -1,5 +1,7 @@
 # One always-on machine: the mailbox, change pages and subscriptions live in its memory, and long-polls stay
-# open up to 50 s. Create the volume once (`fly volumes create puffer_state --size 1`), then `fly deploy --ha=false`.
+# open up to 50 s. Create the volume once (`fly volumes create puffer_state --size 1`), set the account secrets once
+# (`fly secrets set BETTER_AUTH_SECRET=$(openssl rand -base64 32) PUFFER_ADMIN_EMAILS=you@example.com`), then
+# `fly deploy --ha=false`. registry.json, auth.db and the OAuth files live on the volume at /data.
 app = "puffer"
 primary_region = "fra"
 

@@ -1,8 +1,8 @@
 // Who may talk to this relay. Each device (phone) is a tenant: its own agent registry, mailbox and notifier. The
 // phone is the authority on its agents; the relay keeps key digests only. Two indexes, device key digest -> tenant and
 // agent key digest -> (tenant, agent), resolve every bearer key to exactly one tenant, so a key never reaches another
-// tenant's data. Persisted to the state file (0600) as digests, revisions, agent names and when each phone registered and
-// last synced. A phone that never syncs, or has no agents and stops syncing, is pruned (lifecycle below). Single writer:
+// tenant's data. Persisted to the state file (0600) as digests, revisions, agent names, the account (user id) that
+// registered each phone, and when each phone registered and last synced. A phone that never syncs, or has no agents and stops syncing, is pruned (lifecycle below). Single writer:
 // this module.
 
 import { createHash, randomBytes } from 'node:crypto';
@@ -32,13 +32,18 @@ const TenantRecord = WireRegistry.extend({
   deviceKeyDigest: KeyDigest,
   registeredAt: z.number().optional(),
   lastSyncAt: z.number().nullable().optional(),
+  /** The Better Auth user who registered the device (accounts.ts). Absent for devices from before accounts. */
+  userId: z.string().min(1).optional(),
 });
 type TenantRecord = {
   readonly id: TenantId;
-  readonly deviceKeyDigest: KeyDigest;
+  /** Replaced by rotateDeviceKey. */
+  deviceKeyDigest: KeyDigest;
   readonly registeredAt: number;
   /** To the hour (SYNC_PERSIST_MS); null until the phone's first sync. */
   lastSyncAt: number | null;
+  /** The account that owns the device; undefined for devices registered before accounts or with open registration. */
+  readonly userId?: string;
   registry: Registry;
 };
 
@@ -46,7 +51,10 @@ const StateFile = z.object({ tenants: z.array(TenantRecord) });
 /** The single-device file from before tenants. It becomes the first tenant. */
 const LegacyStateFile = WireRegistry.extend({ deviceKeyDigest: KeyDigest });
 
-/** A tenant this process is serving: created on first use, dropped after IDLE_EVICT_MS without a sync or agent call. */
+/**
+ * A tenant this process is serving: created on first use, dropped after IDLE_EVICT_MS without a sync or agent call
+ * unless its mailbox still holds queued writes.
+ */
 export type Tenant = {
   readonly id: TenantId;
   readonly record: TenantRecord;
@@ -60,7 +68,10 @@ export type Tenant = {
   lastActiveAt: number;
 };
 
-/** Mailboxes hold requests at most 24 h, so after two idle days nothing is lost but read cursors and cached pages. */
+/**
+ * Mailboxes hold requests at most 24 h, so after two idle days nothing is lost but read cursors and cached pages. Queued
+ * writes live longer (queuedTtlMs), so a tenant holding any is kept.
+ */
 const IDLE_EVICT_MS = 48 * 60 * 60_000;
 
 const LIFECYCLE = {
@@ -76,7 +87,24 @@ const SYNC_PERSIST_MS = 60 * 60_000;
  * Pure. `pending`: registered, waiting for its first sync. `active`: synced within idleAfterMs. `idle`: kept for its
  * agents but not counted. `prune`: never synced in time, or idle with no agents.
  */
-function lifecycle(record: Pick<TenantRecord, 'registeredAt' | 'lastSyncAt' | 'registry'>, now: number): 'pending' | 'active' | 'idle' | 'prune' {
+export type Lifecycle = 'pending' | 'active' | 'idle' | 'prune';
+
+/**
+ * What GET /v1/device and the operator's admin routes show of a tenant: no content, no key digests. Live counts come
+ * from the tenant this process serves; an evicted tenant has none, so they read 0 and offline.
+ */
+export type TenantSummary = {
+  id: TenantId;
+  registeredAt: number;
+  lastSyncAt: number | null;
+  lifecycle: Lifecycle;
+  agents: { id: AgentId; name: string }[];
+  online: boolean;
+  queuedWrites: number;
+  userId: string | null;
+};
+
+function lifecycle(record: Pick<TenantRecord, 'registeredAt' | 'lastSyncAt' | 'registry'>, now: number): Lifecycle {
   if (record.lastSyncAt === null) return now - record.registeredAt < LIFECYCLE.firstSyncWithinMs ? 'pending' : 'prune';
   if (now - record.lastSyncAt < LIFECYCLE.idleAfterMs) return 'active';
   return record.registry.agents.length > 0 ? 'idle' : 'prune';
@@ -118,9 +146,9 @@ export class Tenants {
       tenants.add({ id: mintTenantId(), deviceKeyDigest, registeredAt: loadedAt, lastSyncAt: loadedAt, registry: { revision, agents } });
       tenants.save();
     } else {
-      for (const { id, deviceKeyDigest, registeredAt, lastSyncAt, revision, agents } of StateFile.parse(raw).tenants) {
+      for (const { id, deviceKeyDigest, registeredAt, lastSyncAt, userId, revision, agents } of StateFile.parse(raw).tenants) {
         const synced = lastSyncAt === undefined ? loadedAt : lastSyncAt;
-        tenants.add({ id, deviceKeyDigest, registeredAt: registeredAt ?? loadedAt, lastSyncAt: synced, registry: { revision, agents } });
+        tenants.add({ id, deviceKeyDigest, registeredAt: registeredAt ?? loadedAt, lastSyncAt: synced, ...(userId ? { userId } : {}), registry: { revision, agents } });
       }
     }
     tenants.prune();
@@ -141,11 +169,14 @@ export class Tenants {
     return active;
   }
 
-  /** POST /v1/device/register: a new tenant and its device key, shown once. Saved before it is returned. */
-  register(): { id: TenantId; deviceKey: string } {
+  /**
+   * POST /v1/device/register: a new tenant and its device key, shown once, owned by `userId` (the signed-in account;
+   * undefined only with --dev-open-register). Saved before it is returned.
+   */
+  register(userId?: string): { id: TenantId; deviceKey: string } {
     const deviceKey = mintDeviceKey();
     const id = mintTenantId();
-    this.add({ id, deviceKeyDigest: digestKey(deviceKey), registeredAt: Date.now(), lastSyncAt: null, registry: { revision: 0, agents: [] } });
+    this.add({ id, deviceKeyDigest: digestKey(deviceKey), registeredAt: Date.now(), lastSyncAt: null, ...(userId ? { userId } : {}), registry: { revision: 0, agents: [] } });
     this.save();
     return { id, deviceKey };
   }
@@ -179,6 +210,76 @@ export class Tenants {
   }
 
   /**
+   * POST /v1/device/rotate: a new device key for this tenant. The old one stops resolving at once; both indexes and
+   * the file change together, and a failed save restores the old key.
+   */
+  rotateDeviceKey(tenant: Tenant): string {
+    const { record } = tenant;
+    const previous = record.deviceKeyDigest;
+    const deviceKey = mintDeviceKey();
+    const next = digestKey(deviceKey);
+    this.devices.delete(previous);
+    this.devices.set(next, record.id);
+    record.deviceKeyDigest = next;
+    try {
+      this.save();
+    } catch (error) {
+      this.devices.delete(next);
+      this.devices.set(previous, record.id);
+      record.deviceKeyDigest = previous;
+      throw error;
+    }
+    return deviceKey;
+  }
+
+  /**
+   * DELETE /v1/device, the operator's DELETE /v1/admin/devices/<id> and a deleted account: the tenant and everything this module holds for
+   * it. Open requests, queued writes included, settle as disconnected so waiting agents return; the mailbox, notifier
+   * and change pages go with the live tenant. Its device and agent keys stop resolving. The caller ends its OAuth state
+   * (AuthServer.forgetTenant). False when no such tenant.
+   */
+  delete(id: TenantId): boolean {
+    const record = this.records.get(id);
+    if (!record) return false;
+    const live = this.live.get(id);
+    live?.mailbox.revoke(record.registry.agents.map((agent) => agent.id));
+    this.remove(record);
+    this.save();
+    return true;
+  }
+
+  /** The summary of one tenant, or null. Never creates a live tenant. */
+  summary(id: TenantId): TenantSummary | null {
+    const record = this.records.get(id);
+    return record ? this.summarize(record, Date.now()) : null;
+  }
+
+  /** The devices an account owns, oldest registration first. */
+  ofUser(userId: string): TenantId[] {
+    return [...this.records.values()].filter((record) => record.userId === userId).sort((a, b) => a.registeredAt - b.registeredAt).map((record) => record.id);
+  }
+
+  /** Every tenant's summary, oldest registration first. */
+  summaries(): TenantSummary[] {
+    const now = Date.now();
+    return [...this.records.values()].sort((a, b) => a.registeredAt - b.registeredAt).map((record) => this.summarize(record, now));
+  }
+
+  private summarize(record: TenantRecord, now: number): TenantSummary {
+    const live = this.live.get(record.id);
+    return {
+      id: record.id,
+      registeredAt: record.registeredAt,
+      lastSyncAt: record.lastSyncAt,
+      lifecycle: lifecycle(record, now),
+      agents: record.registry.agents.map(({ id, name }) => ({ id, name })),
+      online: live?.mailbox.presence().online ?? false,
+      queuedWrites: live?.mailbox.queuedWrites() ?? 0,
+      userId: record.userId ?? null,
+    };
+  }
+
+  /**
    * Applies the phone's snapshot (see applyPhoneRegistry), saving and re-indexing only on a real change. An agent whose
    * digest another tenant already holds is dropped: one key, one tenant. `agents` is the snapshot without those.
    */
@@ -203,7 +304,8 @@ export class Tenants {
     this.prune();
     const now = Date.now();
     for (const [id, tenant] of this.live) {
-      if (now - tenant.lastActiveAt >= IDLE_EVICT_MS) {
+      // A tenant holding queued writes stays until they are applied or expire (queuedTtlMs outlives IDLE_EVICT_MS).
+      if (now - tenant.lastActiveAt >= IDLE_EVICT_MS && tenant.mailbox.queuedWrites() === 0) {
         tenant.notifier.revoke(tenant.record.registry.agents.map((agent) => agent.id));
         this.live.delete(id);
         continue;
@@ -214,11 +316,12 @@ export class Tenants {
   }
 
   save(): void {
-    const tenants = [...this.records.values()].map(({ id, deviceKeyDigest, registeredAt, lastSyncAt, registry }) => ({
+    const tenants = [...this.records.values()].map(({ id, deviceKeyDigest, registeredAt, lastSyncAt, userId, registry }) => ({
       id,
       deviceKeyDigest,
       registeredAt,
       lastSyncAt,
+      ...(userId ? { userId } : {}),
       ...registry,
     }));
     writeStateFile(this.options.path, { tenants });

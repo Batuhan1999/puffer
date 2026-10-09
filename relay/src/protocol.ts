@@ -266,7 +266,23 @@ export type NoteQuery =
 /** Note requests answered with one note. */
 export type SingleNoteKind = Extract<NoteQuery['kind'], 'getNote' | 'createNote' | 'appendToNote' | 'updateNote' | 'deleteNote'>;
 
-export type WireRequest = { id: RequestId; agentId: AgentId; askedAt: string; expiresAt: string } & RequestQuery;
+/**
+ * The offline write changelog (mailbox.ts) rides on the existing request path rather than a pull/ack of its own: a note
+ * write asked while the phone was offline is held as an ordinary request and handed over on the phone's next sync like
+ * any other, in the order it was asked, with `queued: true` and `queuedAt` (when the relay queued it). A queued
+ * createNote also carries `noteId`, the id the relay already told the agent: a lowercase UUID, the phone's own format
+ * (NoteBook.newID), which the phone keeps for the note. The phone applies queued writes in this order, idempotent by
+ * request id, and answers each in its outbox as usual; the relay acks it by request id and drops its content then. A
+ * phone that does not know the flags runs it as a live write (a create then gets its own id, which its answer names).
+ * Reads never see queued writes until the phone ran them.
+ *
+ * TODO: queued writes are note content held on the relay in plain memory while the phone is away. Before more users,
+ * encrypt each one to a public key the phone registers, so only that phone can read it, and persist the ciphertext so
+ * a restart does not lose writes.
+ */
+export type QueuedFlags = { queued?: true; queuedAt?: string; noteId?: NoteId };
+
+export type WireRequest = { id: RequestId; agentId: AgentId; askedAt: string; expiresAt: string } & RequestQuery & QueuedFlags;
 
 export type WireAck = { id: RequestId; kind: OutcomeKind };
 

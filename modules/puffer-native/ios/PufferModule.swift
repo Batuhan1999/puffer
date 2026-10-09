@@ -156,6 +156,21 @@ public class PufferModule: Module {
       try await Bridge.shared.unpair()
     }
 
+    // Unverified (cloud): validate on the Mac
+    AsyncFunction("rotateDeviceKey") { () async throws in
+      try await Bridge.shared.rotateDeviceKey()
+    }
+
+    // Unverified (cloud): validate on the Mac
+    AsyncFunction("deleteRelayData") { () async throws in
+      try await Bridge.shared.deleteRelayData()
+    }
+
+    // Unverified (cloud): validate on the Mac
+    AsyncFunction("setRelaySession") { (token: String?) async throws in
+      try await Bridge.shared.setSession(token)
+    }
+
     // folders
 
     AsyncFunction("pickFolder") { (promise: Promise) in
@@ -237,6 +252,9 @@ public class PufferModule: Module {
     switch relay {
     case .unpaired:
       return ["kind": "unpaired"]
+    // Unverified (cloud): validate on the Mac
+    case .signedOut:
+      return ["kind": "signedOut"]
     case let .paired(url, lastContact, lastError):
       return ["kind": "paired", "url": url.absoluteString, "lastContact": nullable(lastContact.map(ms)), "lastError": nullable(lastError)]
     }
@@ -247,6 +265,8 @@ public class PufferModule: Module {
       "id": entry.id.rawValue, "agentId": entry.agentID.rawValue, "agentName": entry.agentName, "question": entry.question,
       "receivedAt": ms(entry.receivedAt), "phase": encode(entry.phase), "writes": entry.note?.writes ?? false,
       "delivered": entry.reported == entry.phase.tag,
+      // Unverified (cloud): validate on the Mac
+      "queuedAt": nullable(entry.queued.map { ms($0.at) }),
     ]
   }
 

@@ -25,6 +25,12 @@ export class RateLimit<K> {
     }
     return ++window.count <= this.limit;
   }
+
+  /** Whether `take` would refuse this key now, without counting: for limits that count only failures. */
+  exhausted(key: K): boolean {
+    const window = this.windows.get(key);
+    return window !== undefined && Date.now() - window.startedAt < this.windowMs && window.count >= this.limit;
+  }
 }
 
 /**

@@ -5,6 +5,7 @@ import { Stack, useRouter } from 'expo-router';
 import { useState } from 'react';
 import { Alert } from 'react-native';
 
+import { authClient, signOut } from '@/auth';
 import { type Agent, historyOf, lastActivity, type PendingConnect, type RelayStatus, useBridge } from '@/bridge';
 import { orange, secondary } from '@/ui/colors';
 import { ago } from '@/ui/format';
@@ -39,6 +40,14 @@ export default function AgentsScreen() {
   const [copied, setCopied] = useState(false);
   const message = connectMessage(relay);
   const history = historyOf(requests, reads);
+  const account = authClient.useSession().data?.user ?? null;
+  const signIn = () => router.push('/sign-in');
+
+  const confirmSignOut = () =>
+    Alert.alert('Sign Out?', 'Your agents stay connected. To remove this iPhone from the relay, use Delete My Data on Relay.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Sign Out', style: 'destructive', onPress: () => void signOut().catch(alertError('Could Not Sign Out')) },
+    ]);
 
   const disconnect = (agent: Agent) =>
     Alert.alert(`Disconnect ${agent.name}?`, `${agent.name} can no longer read or write your notes, and its key stops working.`, [
@@ -49,6 +58,26 @@ export default function AgentsScreen() {
         onPress: () => void bridge.disconnect(agent.id).catch(alertError('Could Not Disconnect')),
       },
     ]);
+
+  const resetKey = () =>
+    Alert.alert('Reset Relay Key?', 'Puffer gets a new key from the relay and the old one stops working. Your agents stay connected.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Reset', onPress: () => void bridge.rotateDeviceKey().catch(alertError('Could Not Reset the Key')) },
+    ]);
+
+  const deleteRelayData = () =>
+    Alert.alert(
+      'Delete Your Data on the Relay?',
+      'The relay deletes this iPhone, its agent keys and any requests it holds. Every agent is disconnected, and Puffer stops using the relay until you pair again.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: () => void bridge.deleteRelayData().catch(alertError('Could Not Delete the Data')),
+        },
+      ],
+    );
 
   return (
     <>
@@ -111,10 +140,31 @@ export default function AgentsScreen() {
               />
               <ShareLink item={message} />
             </>
+          ) : relay.kind === 'signedOut' ? (
+            <>
+              <Text modifiers={[secondary]}>Sign in to connect agents.</Text>
+              <Button label="Sign In" systemImage="person.crop.circle" onPress={signIn} />
+            </>
           ) : (
             <Text modifiers={[secondary]}>Puffer is setting up its relay. Check the internet connection.</Text>
           )}
         </Section>
+
+        {bridge.loaded ? (
+          <Section
+            title="Account"
+            footer={<Text>Your account on the relay registers this iPhone. Agents never see it.</Text>}
+          >
+            {account ? (
+              <>
+                <Label title={account.email} systemImage="person.crop.circle" />
+                <Button label="Sign Out" systemImage="rectangle.portrait.and.arrow.right" role="destructive" onPress={confirmSignOut} />
+              </>
+            ) : (
+              <Button label="Sign In or Create Account" systemImage="person.crop.circle.badge.plus" onPress={signIn} />
+            )}
+          </Section>
+        ) : null}
 
         {relay.kind === 'paired' ? (
           <Section title="Relay">
@@ -123,6 +173,8 @@ export default function AgentsScreen() {
               <Text>{relay.lastContact === null ? 'Never' : ago(relay.lastContact)}</Text>
             </LabeledContent>
             {relay.lastError ? <Text modifiers={[font({ size: 15 }), orange]}>{relay.lastError}</Text> : null}
+            <Button label="Reset Relay Key" systemImage="key" onPress={resetKey} />
+            <Button label="Delete My Data on Relay" systemImage="trash" role="destructive" onPress={deleteRelayData} />
           </Section>
         ) : null}
 

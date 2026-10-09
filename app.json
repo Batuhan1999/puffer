@@ -23,7 +23,9 @@
           }
         }
       ],
-      "./modules/puffer-native/app.plugin.js"
+      "./modules/puffer-native/app.plugin.js",
+      "expo-secure-store",
+      "expo-web-browser"
     ],
     "scheme": "puffer",
     "platforms": [

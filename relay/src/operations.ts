@@ -4,7 +4,7 @@
 
 import type { z } from 'zod';
 
-import { MailboxFull, TooManyRequests, type Mailbox, type ToolOutcome } from './mailbox';
+import { MailboxFull, OfflineQueueFull, TooManyRequests, type Mailbox, type ToolOutcome } from './mailbox';
 import {
   RECENT_LIMIT_DEFAULT,
   wireTime,
@@ -73,7 +73,8 @@ export const SOURCES_DESCRIPTION =
 
 export const GET_ANSWER_DESCRIPTION =
   'Get the answer to an earlier ask_puffer, list_puffer_recent, list_puffer_sources, get_puffer_changes or note ' +
-  'request (search_notes, get_note, create_note and the others) by its request_id. If the request is still open, waits up to the relay wait budget and then returns the current status.';
+  'request (search_notes, get_note, create_note and the others) by its request_id. If the request is still open, waits up to the relay wait budget and then returns the current status. A write queued while the phone is offline ' +
+  'stays queued until the phone comes back and applies it.';
 
 export const CHANGES_DESCRIPTION =
   "List what changed in the user's Puffer library (documents and notes): files added, updated or removed, oldest " +
@@ -103,7 +104,7 @@ export type Structured = {
 /** `message` says the same as `structured` in words, for an agent that reads text. */
 export type Reply =
   | { kind: 'result'; structured: Structured; message: string; files: DocumentFile[] }
-  | { kind: 'refused'; reason: 'too_many_open_requests' | 'rate_limited'; message: string };
+  | { kind: 'refused'; reason: 'too_many_open_requests' | 'rate_limited' | 'offline_queue_full'; message: string };
 
 export type Operations = ReturnType<typeof operations>;
 
@@ -162,6 +163,16 @@ async function parked(wait: () => Promise<ToolOutcome>, openUrl: OpenUrl, docume
         kind: 'refused',
         reason: 'too_many_open_requests',
         message: `You already have ${error.open} open Puffer requests. Collect them with get_puffer_answer before asking more.`,
+      };
+    }
+    if (error instanceof OfflineQueueFull) {
+      const held = error.cap === 'writes' ? `${error.limit} queued writes` : `${error.limit.toLocaleString('en-US')} characters of queued note text`;
+      return {
+        kind: 'refused',
+        reason: 'offline_queue_full',
+        message:
+          `The phone is offline and Puffer already holds as many writes for it as it can (at most ${held}), so nothing ` +
+          'was written or queued. Ask the user to open Puffer on their iPhone so the queued writes are applied, then try again.',
       };
     }
     if (error instanceof TooManyRequests) {
@@ -280,6 +291,28 @@ function render(outcome: ToolOutcome, openUrl: OpenUrl, documents: boolean): Rep
       return text(outcome, `Puffer could not check this request: ${outcome.reason}`, { reason: outcome.reason });
     case 'processing':
       return text(outcome, `The phone has request ${id} and is still working on it. Call get_puffer_answer with this request_id shortly.`);
+    case 'queued': {
+      const keptUntil = wireTime(outcome.keptUntil);
+      const created = outcome.noteId === null ? '' :
+        ` The new note will have note_id ${outcome.noteId}; you can already append to, update or delete it, and those writes queue behind this one.`;
+      const merged = outcome.of === 'updateNote'
+        ? ' If the user edits the note before then, Puffer merges your lines with theirs instead of answering conflict.'
+        : '';
+      return text(
+        outcome,
+        `The phone is offline, so Puffer queued this write on the relay as request ${id}, without running it yet. Puffer ` +
+          'applies queued writes the next time it runs on the iPhone, in the order you made them, and keeps them until ' +
+          `${keptUntil}. Until then get_note, search_notes and list_notes do not show it.${created}${merged} Call ` +
+          `get_puffer_answer with this request_id later for the result. To have it applied sooner, ask the user to open ` +
+          `Puffer on their iPhone; this link opens the app: ${openUrl(id)}`,
+        {
+          queued_at: wireTime(outcome.queuedAt),
+          kept_until: keptUntil,
+          ...(outcome.noteId === null ? {} : { note_id: outcome.noteId }),
+          open_url: openUrl(id),
+        },
+      );
+    }
     case 'phone_offline': {
       const lastSeen = outcome.lastSeenAt === null ? null : wireTime(outcome.lastSeenAt);
       return text(

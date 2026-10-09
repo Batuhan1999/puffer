@@ -22,6 +22,14 @@ enum NoteRequest: Codable, Sendable, Hashable {
   }
 }
 
+// Unverified (cloud): validate on the Mac
+/// A note write the relay queued while this phone was offline (design/notes/CONTRACT.md section 3a). `noteID`: on a
+/// create, the id the relay already told the agent, which the note keeps.
+struct QueuedWrite: Codable, Sendable, Hashable {
+  let at: Date
+  let noteID: NoteID?
+}
+
 /// A note as an answer carries it. `snippet` for summaries, `body` for a whole note; either may be absent.
 struct NoteView: Codable, Sendable, Hashable {
   let id: NoteID
@@ -72,9 +80,18 @@ extension NoteBook {
   static let bodyLimit = 200_000
 
   /// Runs one agent request. Writes carry the agent as their editor, so the note shows "Edited by". A create's note id
-  /// comes from the request id, so a retried request converges on the note it made.
-  func handle(_ request: NoteRequest, requestID: RequestID, agent: NoteEditor) async throws -> NoteOutcome {
+  /// comes from the request id, so a retried request converges on the note it made. A `queued` write (written while
+  /// this phone was offline) creates under the relay-minted id and merges a stale update instead of answering conflict.
+  func handle(_ request: NoteRequest, requestID: RequestID, agent: NoteEditor, queued: QueuedWrite? = nil) async throws -> NoteOutcome {
     try open()
+    // Unverified (cloud): validate on the Mac
+    let outcome = try await perform(request, requestID: requestID, agent: agent, queued: queued)
+    // The body an agent was handed, by version, so a later queued update_note can merge from it.
+    if case let .done(.note(view)) = outcome, view.body != nil { try? rememberBase(view.id) }
+    return outcome
+  }
+
+  private func perform(_ request: NoteRequest, requestID: RequestID, agent: NoteEditor, queued: QueuedWrite?) async throws -> NoteOutcome {
     switch request {
     case let .search(query, folder, recent, limit):
       var folderID: NoteFolderID?
@@ -130,7 +147,9 @@ extension NoteBook {
       return try applying(requestID) {
         let folderID = try folder.map { try createFolder(named: $0).id }
         let text = title.map { NoteImport.body(title: $0, text: body) } ?? body
-        let note = try create(body: text, folder: folderID, editor: agent, id: Self.noteID(for: requestID))
+        // Unverified (cloud): validate on the Mac
+        // A queued create keeps the id the relay told the agent; a note with it already is this create's replay.
+        let note = try create(body: text, folder: folderID, editor: agent, id: queued?.noteID ?? Self.noteID(for: requestID))
         if note.deletedAt != nil { return .refused("Puffer made this note for this request, and it was deleted since.") }
         return .done(.note(view(note, body: true)))
       }
@@ -149,6 +168,16 @@ extension NoteBook {
         guard let note = try note(id), note.deletedAt == nil else { return .nothingFound }
         if note.body.utf16.count > Self.bodyLimit {
           return .refused("This note is over 200,000 characters, so agents see only its start and cannot replace it. Edit it in Puffer.")
+        }
+        // Unverified (cloud): validate on the Mac
+        // Written while offline against a version the user has edited since: both sides' lines survive, as when the
+        // user and an agent edit at once (NoteSession). Without the body at baseVersion it stays a conflict.
+        if queued != nil, note.version != baseVersion, let base = try base(of: id, version: baseVersion) {
+          let merged = NoteMerge.merge(base: base, ours: note.body, theirs: body)
+          if merged.utf16.count > Self.bodyLimit {
+            return .refused("Merged with the user's edits, this note would be longer than 200,000 characters. Read it again and retry.")
+          }
+          return written(try update(id, body: merged, baseVersion: note.version, editor: agent))
         }
         return written(try update(id, body: body, baseVersion: baseVersion, editor: agent))
       }

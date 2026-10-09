@@ -661,6 +661,25 @@ export class AuthServer {
       : { ...listed, origin: 'link', clientName: origin.name };
   }
 
+  /**
+   * The tenant was deleted (DELETE /v1/device, or the operator): its OAuth sessions go, a connection it claimed and
+   * still open ends declined, so the waiting agent or page hears at once, and its ended revoking ones are forgotten.
+   */
+  forgetTenant(tenant: TenantId): void {
+    this.sessions.forgetTenant(tenant);
+    let ended = false;
+    for (const [id, connection] of this.connections) {
+      if (connection.claimedBy !== tenant) continue;
+      if (connection.phase.kind !== 'ended') {
+        connection.phase = { kind: 'ended', outcome: 'declined', at: Date.now() };
+        ended = true;
+      } else if (revokes(connection.phase)) {
+        this.connections.delete(id);
+      }
+    }
+    if (ended) this.moved();
+  }
+
   /** Digests this tenant's phone should remove, on every sync response while its registry still holds them. */
   revokedKeys(tenant: TenantId): KeyDigest[] {
     this.sweep();
@@ -810,7 +829,7 @@ function displayName(raw: string | undefined, fallback: RedirectUri): string {
 }
 
 /** Constant time whatever the lengths: both sides are hashed first. */
-function sameSecret(a: string, b: string): boolean {
+export function sameSecret(a: string, b: string): boolean {
   return timingSafeEqual(createHash('sha256').update(a).digest(), createHash('sha256').update(b).digest());
 }
 

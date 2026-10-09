@@ -1,6 +1,6 @@
 # Puffer relay
 
-The relay connects AI agents to the Puffer app on the user's iPhone. Agents call MCP tools at `/mcp`, or the same operations as plain JSON under `/v1` (see [HTTP API](#http-api)). The phone long-polls `/v1/device/sync` and answers each request, including the note operations (`design/notes/CONTRACT.md`). Each phone is a tenant: its agents, requests, change pages, webhooks and connections are invisible to every other phone, and every bearer key resolves to exactly one tenant. A new phone registers itself with `POST /v1/device/register` (no auth, 5 per caller address per hour, at most `--max-devices`) and gets its own `dk_` key. The relay keeps requests, change pages, notification settings, and pending OAuth connections in memory, per tenant. It writes four files to disk, all owner-only. `registry.json` holds, per tenant, its id, the device key digest, when it registered and last synced (to the hour), and each agent's id, name, and key digest; a single-device file from before tenants becomes the first tenant at startup. At startup and every 30 s the relay prunes a device that did not sync within 24 hours of registering, and a device without agents that has not synced for 30 days. Its key then gets `401 unknown_device`, and the phone registers again. Only devices that synced within 30 days, or registered in the last 24 hours, count against `--max-devices`. `oauth-clients.json`, in the same directory, holds the OAuth clients that registered themselves. `oauth-sessions.json` and `oauth-session-key.json` hold the OAuth sessions and the key that signs their access tokens (see [OAuth](#oauth)).
+The relay connects AI agents to the Puffer app on the user's iPhone. Agents call MCP tools at `/mcp`, or the same operations as plain JSON under `/v1` (see [HTTP API](#http-api)). The phone long-polls `/v1/device/sync` and answers each request, including the note operations (`design/notes/CONTRACT.md`). Each phone is a tenant: its agents, requests, change pages, webhooks and connections are invisible to every other phone, and every bearer key resolves to exactly one tenant. Users have accounts (see [Accounts](#accounts)): a signed-in phone registers itself with `POST /v1/device/register` (the account's session token, 5 per caller address per hour, at most `--max-devices-per-user` per account and `--max-devices` in all) and gets its own `dk_` key. The relay keeps requests, change pages, notification settings, and pending OAuth connections in memory, per tenant. It writes six files to disk, all owner-only. `registry.json` holds, per tenant, its id, the device key digest, the id of the account that registered it, when it registered and last synced (to the hour), and each agent's id, name, and key digest; a single-device file from before tenants becomes the first tenant at startup. At startup and every 30 s the relay prunes a device that did not sync within 24 hours of registering, and a device without agents that has not synced for 30 days. Its key then gets `401 unknown_device`, and the phone registers again. Only devices that synced within 30 days, or registered in the last 24 hours, count against `--max-devices`. `oauth-clients.json`, in the same directory, holds the OAuth clients that registered themselves. `oauth-sessions.json` and `oauth-session-key.json` hold the OAuth sessions and the key that signs their access tokens (see [OAuth](#oauth)). `auth.db` (SQLite) holds the accounts, and outside production `auth-secret` holds the key that signs their sessions.
 
 ## Run it locally
 
@@ -9,14 +9,16 @@ npm install
 npm run relay
 ```
 
-The relay starts with no devices. Puffer registers itself at its first start. To pair a phone with a relay by hand, register a device and open the link on the phone:
+The relay starts with no devices and no accounts. Puffer registers itself once the user signs in. To pair a phone with a relay by hand, create an account, register a device with its session token, and open the link on the phone:
 
 ```sh
-key=$(curl -s -X POST http://localhost:8787/v1/device/register | node -p 'JSON.parse(require("fs").readFileSync(0)).deviceKey')
+token=$(curl -s -X POST http://localhost:8787/api/auth/sign-up/email -H 'content-type: application/json' -H 'expo-origin: puffer://' \
+  -d '{"name":"Me","email":"me@example.com","password":"a long password"}' | node -p 'JSON.parse(require("fs").readFileSync(0)).token')
+key=$(curl -s -X POST http://localhost:8787/v1/device/register -H "Authorization: Bearer $token" | node -p 'JSON.parse(require("fs").readFileSync(0)).deviceKey')
 echo "puffer://pair?relay=http%3A%2F%2Flocalhost%3A8787&key=$key"
 ```
 
-`npm run e2e` starts its own relay on a free port, plays two phones and their agents against it (over MCP, the HTTP API, OAuth, and connect by message), starts a second relay without `--dev-callbacks` to check the address policy and a third from a hand-written `registry.json` to check pruning, and prints one line per assertion.
+`npm run e2e` starts its own relay on a free port, plays two phones and their agents against it (over MCP, the HTTP API, OAuth, and connect by message), starts a second relay without `--dev-callbacks` to check the address policy and a third from a hand-written `registry.json` to check pruning, and prints one line per assertion. Its relays register devices without accounts: the npm script sets `PUFFER_OPEN_REGISTER=1` (see below), which every relay it starts inherits. `npm run e2e:auth` tests accounts, registration, device self-management and the admin routes.
 
 ## Flags and environment
 
@@ -33,8 +35,18 @@ A flag wins over its environment variable.
 | none | `PUFFER_TRUST_PROXY=fly` | unset | Per-caller rate limits key on the `Fly-Client-IP` header that Fly's proxy sets. Unset, they key on the connection's address and ignore that header. Set it only behind Fly's proxy, because anyone else can forge the header. |
 | `--notify-debounce-ms` | `PUFFER_NOTIFY_DEBOUNCE_MS` | `3000` | Head changes for one agent inside this window send one ping. |
 | `--offline-after-ms` | none | `35000` | The phone counts as offline after this long without a sync. The e2e shortens it. |
+| `--queued-ttl-ms` | `PUFFER_QUEUED_TTL_MS` | `604800000` (7 days) | How long a note write queued while the phone is offline waits for the phone. Past it the write expires unapplied. The e2e shortens it. See [Offline writes](#offline-writes). |
+| `--queued-writes-max` | `PUFFER_QUEUED_WRITES_MAX` | `200` | Queued writes one device holds at once. Past it, a write answers `429 offline_queue_full`. |
+| `--queued-bytes-max` | `PUFFER_QUEUED_BYTES_MAX` | `4194304` | Characters (UTF-16 units) of note text the queued writes of one device hold at once. Past it, a write answers `429 offline_queue_full`. |
 | `--connect-ttl-ms` | none | `600000` | How long an OAuth connection waits for the user to approve it on the phone. The e2e shortens it. |
 | `--max-devices` | `PUFFER_MAX_DEVICES` | `1000` | Devices the relay holds at most. Past it, `POST /v1/device/register` answers 503. |
+| `--max-devices-per-user` | `PUFFER_MAX_DEVICES_PER_USER` | `5` | Devices one account may register. Past it, `POST /v1/device/register` answers `403 device_limit`. |
+| none | `NODE_ENV=production` | unset | Production: `BETTER_AUTH_SECRET` is required, `--dev-open-register` is refused, and Better Auth's own rate limits (per caller address) turn on. The Docker image sets it. |
+| none | `BETTER_AUTH_SECRET` | minted | Signs account sessions; 32 characters or more. Required in production. Outside production the relay mints one into `auth-secret` next to `registry.json` (0600) and reuses it. Changing it signs every user out. |
+| none | `PUFFER_ADMIN_EMAILS` | unset | Comma-separated emails (any case) whose accounts get the `admin` role: at sign-up, and at startup for accounts that already exist. See [Accounts](#accounts) for the caveat. |
+| none | `PUFFER_ADMIN_USER_IDS` | unset | Comma-separated Better Auth user ids that are admins whatever their role. |
+| none | `APPLE_CLIENT_ID`, `APPLE_TEAM_ID`, `APPLE_KEY_ID`, `APPLE_PRIVATE_KEY`, `APPLE_APP_BUNDLE_IDENTIFIER` | unset | Sign in with Apple. All four of the first must be set together (`APPLE_PRIVATE_KEY` is the `.p8` PEM; `\n` escapes are allowed). The bundle identifier (`dev.local.puffer` in `app.json`) lets the app sign in with a native Apple ID token. Unset, Apple is off. |
+| `--dev-open-register` | `PUFFER_OPEN_REGISTER=1` | off | Development and `npm run e2e` only: `POST /v1/device/register` works without a session. Refused with `NODE_ENV=production`. |
 
 ## HTTP API
 
@@ -78,6 +90,7 @@ A result is the `structuredContent` of the matching MCP tool plus `message`, the
 | `expired` | Settled. The request ran out, or its ID is unknown or belongs to another agent, so the API does not reveal which IDs exist. |
 | `failed` | Settled. The phone could not run it; `reason` says why. |
 | `processing`, `phone_offline` | Not final. Collect it later with its `request_id`. `phone_offline` adds `open_url`, a page that opens Puffer. |
+| `queued` | Not final. A note write (create, append, update, delete) queued while the phone is offline, applied when it comes back. Adds `queued_at`, `kept_until`, `open_url`, and for a create the `note_id` the note will have. See [Offline writes](#offline-writes). |
 
 Every response carries `Cache-Control: no-store`.
 
@@ -94,6 +107,7 @@ Errors are `{"error": "<code>", "message": "<text>"}`.
 | 405 | `method_not_allowed` | The method does not match the path. `Allow` names the right one. |
 | 413 | `body_too_large` | The body is over 8 KB, or 1 MB for a note write. The relay closes the connection after this answer. |
 | 429 | `rate_limited` | The agent started more than 20 requests in the last minute. `Retry-After` is 60. |
+| 429 | `offline_queue_full` | The phone is offline and its device already holds `--queued-writes-max` queued writes or `--queued-bytes-max` of queued note text. Nothing was written or queued. There is no `Retry-After`: the queue empties when the phone comes back. |
 | 429 | `too_many_open_requests` | The agent has 10 open requests. Collect them with `GET /v1/answers/<request_id>`. There is no `Retry-After`, because a slot frees up only when a request settles or expires. |
 
 The API sends no CORS headers, and like `/mcp` it refuses a request whose `Origin` names another host. Call it from a server.
@@ -126,12 +140,72 @@ curl -s -X PATCH http://localhost:8787/v1/notes/<note_id> \
   -d '{"body": "# Packing list\n\n- tent\n- stove", "base_version": 3}'
 ```
 
+### Offline writes
+
+While the phone is offline (no sync for `--offline-after-ms`), `create_note`, `append_to_note`, `update_note`, and `delete_note` do not answer `phone_offline`. The relay queues the write and answers `queued` with its `request_id`. The phone applies queued writes on its next sync, in the order the agents wrote them, and its answers settle them as usual, so `get_puffer_answer` returns the note afterwards.
+
+- A queued create answers with the `note_id` the note will have, a lowercase UUID the relay mints in the phone's format. The agent can append to, update, or delete that note right away, and those writes queue behind the create.
+- Reads (`get_note`, `search_notes`, `list_notes`, `ask_puffer`) do not see queued writes until the phone has applied them. The `queued` message says so.
+- A queued `update_note` whose note the user edited since `base_version` is merged line by line with the user's edits on the phone instead of answering `conflict`.
+- The phone gets each write as an ordinary request with `queued: true`, `queuedAt`, and, for a create, `noteId`. It applies each one once, by request ID, and acks it in its outbox. The relay then drops the write's note text.
+- Queued writes do not count against the 10 open requests per agent. They count against the device's caps, `--queued-writes-max` and `--queued-bytes-max`, and live `--queued-ttl-ms` (7 days by default), after which they expire unapplied. `GET /v1/device` reports `queuedWrites`.
+- Deleting the device (`DELETE /v1/device`, the operator's `DELETE /v1/admin/devices/<id>`, or deleting the account) drops its queue.
+- Queued writes live in the relay's memory, unencrypted, and a restart loses them (their agents then read `expired`). Encrypting them to a key only the phone holds and persisting the ciphertext is a TODO.
+
 Read what changed since the `next_cursor` of the previous call, and fetch the OpenAPI document:
 
 ```sh
 curl -s "http://localhost:8787/v1/changes?since=18" -H "Authorization: Bearer $PUFFER_KEY"
 curl -s http://localhost:8787/openapi.json
 ```
+
+## Accounts
+
+Accounts are [Better Auth](https://www.better-auth.com) 1.7.6, mounted at `/api/auth` on a SQLite database `auth.db` next to `registry.json` (Node's built-in `node:sqlite`; the relay creates and migrates its tables at startup). A user signs up and in with email and password, or with Apple when the `APPLE_*` variables are set. Each sign-in answers a session token (in the body as `token`, and signed in the `set-auth-token` header). Send it as `Authorization: Bearer <token>` (Better Auth's bearer plugin). Sessions last 7 days and renew while used.
+
+The app uses Better Auth's Expo client, which sends its scheme as the `expo-origin` header. The relay trusts the origin `puffer://` (the scheme in `app.json`), plus `exp://` outside production; a browser request from any other origin gets 403. Agents never use accounts: their `ak_` keys and OAuth (below) are unchanged.
+
+| Endpoint | Effect |
+| --- | --- |
+| `POST /api/auth/sign-up/email` | `{"name", "email", "password"}` (password 8 to 128 characters). Creates the account and signs in. |
+| `POST /api/auth/sign-in/email` | `{"email", "password"}`. A wrong password is 401. |
+| `GET /api/auth/get-session` | The session and user, or `null`. |
+| `POST /api/auth/sign-out` | Ends the session. The phone's device stays registered. |
+| `POST /api/auth/delete-user` | `{"password"}`. Deletes the account and every device it registered, like `DELETE /v1/device` for each. |
+| `/api/auth/admin/*` | Better Auth's admin plugin, for accounts with the `admin` role: `list-users`, `set-role`, `ban-user`, `unban-user`, `remove-user` (which deletes the user's devices too), `list-user-sessions`, `revoke-user-sessions`, and the rest of the plugin. |
+
+`POST /v1/device/register` needs a session: without one it answers `401 sign_in_required`. The new device belongs to that account (its user id is stored in `registry.json`), and an account holds at most `--max-devices-per-user` devices. Sign-in gates only registration and account management. The phone then syncs, rotates and deletes with its `dk_` key as before, and signing out does not unregister it.
+
+Admins are accounts with the `admin` role. `PUFFER_ADMIN_EMAILS` gives the role to those addresses when they sign up and, at each start, to existing accounts with them. Sign-up does not verify email addresses, so whoever signs up first with a listed address becomes admin: create your account before you list it (the next start promotes it), or use `PUFFER_ADMIN_USER_IDS` with your user id. An admin can give the role to others with `POST /api/auth/admin/set-role`.
+
+## Devices and admin
+
+A phone manages its own device with its `dk_` key. None of these answers carry content, keys, or digests.
+
+| Endpoint | Effect |
+| --- | --- |
+| `GET /v1/device` | The device's account: `deviceId`, `registeredAt`, `lastSyncAt` (to the hour, `null` before the first sync), `lifecycle` (`pending`, `active`, or `idle`), `agentCount`, `online`, and `queuedWrites` (note writes waiting for the phone). `online` and `queuedWrites` read `false` and `0` while the relay is not serving the device in memory. |
+| `POST /v1/device/rotate` | A new `dk_` key for the same device, as `{"v": 1, "deviceId", "deviceKey"}`. The old key gets `401 unknown_device` from that moment. The registry file holds only the new digest. Agents and their keys are unchanged. |
+| `DELETE /v1/device` | Deletes the device and everything the relay holds for it: its agents' keys, their OAuth sessions, the connections it confirmed (a waiting one polls `access_denied`), open and queued requests (their agents get `disconnected`), change pages, webhooks, and event subscriptions. The registry file no longer names it. Afterwards its `dk_` key and its agents' `ak_` keys and access tokens get 401. Answers `{"v": 1, "deleted": true}`. |
+
+An admin account (see [Accounts](#accounts)) can list and remove devices. Send its session token as `Authorization: Bearer <token>`. No valid session answers 401, an account without the admin role 403. After 10 such failures from one caller in 15 minutes, that caller gets 429 for the rest of the window, even with an admin session. `PUFFER_ADMIN_TOKEN` is no longer read.
+
+| Endpoint | Effect |
+| --- | --- |
+| `GET /v1/admin/devices` | Every device, oldest first, in the `GET /v1/device` shape plus `agents` as `[{"id", "name"}]`, `userId` and the account's `email` (both `null` for a device registered before accounts or with `--dev-open-register`). |
+| `DELETE /v1/admin/devices/<device id>` | Deletes that device like `DELETE /v1/device`. An unknown ID is 404. |
+| `GET /v1/admin/stats` | Counts: `devices`, by lifecycle (`pending`, `active`, `idle`, `prune`), `countedAgainstMax`, `maxDevices`, `users`, `online`, `agents`, and `queuedWrites`. |
+
+```sh
+token=$(curl -s -X POST http://localhost:8787/api/auth/sign-in/email -H 'content-type: application/json' -H 'expo-origin: puffer://' \
+  -d '{"email":"you@example.com","password":"..."}' | node -p 'JSON.parse(require("fs").readFileSync(0)).token')
+curl -s http://localhost:8787/v1/admin/devices -H "Authorization: Bearer $token"
+curl -s -X DELETE http://localhost:8787/v1/admin/devices/tn_... -H "Authorization: Bearer $token"
+curl -s http://localhost:8787/api/auth/admin/list-users -H "Authorization: Bearer $token"
+curl -s -X POST http://localhost:8787/api/auth/admin/remove-user -H "Authorization: Bearer $token" -H 'content-type: application/json' -d '{"userId":"..."}'
+```
+
+`npm run e2e:auth` tests these routes.
 
 ## OAuth
 
@@ -231,20 +305,21 @@ Callback URLs for webhooks and event subscriptions must be public https in produ
 
 Request headers must arrive within 10 s. A request body must arrive within 30 s, a sync body within 2 minutes (its wait for a turn included), and a body from an unauthenticated caller within 10 s. These limits end when the request has arrived, so the 25 s device long-poll and the 50 s tool-call wait are not affected. `/healthz` answers `{"ok":true}` and nothing else.
 
-Put `oauth-clients.json`, `oauth-sessions.json`, and `oauth-session-key.json` on the same volume. The relay writes them next to `registry.json`.
+Put `oauth-clients.json`, `oauth-sessions.json`, `oauth-session-key.json`, and `auth.db` on the same volume. The relay writes them next to `registry.json`. The image sets `NODE_ENV=production`, so set `BETTER_AUTH_SECRET` (a secret, not in `fly.toml`): losing it signs every user out, losing `auth.db` loses every account.
 
 To run the image locally:
 
 ```sh
 docker build -t puffer-relay .
-docker run --rm -p 127.0.0.1:8787:8080 -v puffer-state:/data -e PUFFER_PUBLIC_URL=http://localhost:8787 puffer-relay
+docker run --rm -p 127.0.0.1:8787:8080 -v puffer-state:/data -e PUFFER_PUBLIC_URL=http://localhost:8787 -e BETTER_AUTH_SECRET=$(openssl rand -base64 32) puffer-relay
 ```
 
 To deploy on Fly.io with `fly.toml`:
 
 1. Set `app` and `PUFFER_PUBLIC_URL` in `fly.toml` to your app name and its `https://<app>.fly.dev` origin. `fly.toml` also sets `PUFFER_TRUST_PROXY=fly`.
 2. Create the volume with `fly volumes create puffer_state --size 1`.
-3. Deploy one machine with `fly deploy --ha=false`.
-4. Open Puffer on the phone. It registers itself with the relay.
+3. Set the account secrets: `fly secrets set BETTER_AUTH_SECRET=$(openssl rand -base64 32)`, and `PUFFER_ADMIN_EMAILS` (or `PUFFER_ADMIN_USER_IDS`) for yourself. For Sign in with Apple also set the `APPLE_*` variables, and add `https://<app>.fly.dev/api/auth/callback/apple` as a return URL of the Services ID.
+4. Deploy one machine with `fly deploy --ha=false`.
+5. Open Puffer on the phone and sign in (Agents). It registers itself with the relay.
 
 The image starts as root only to give the volume to the unprivileged `node` user, then runs the relay as `node` through `setpriv`. The base image is pinned to `node:24.15.0-bookworm-slim`. An earlier version of the image was checked with `docker build` and a local `docker run`. The pinned, non-root version has not been built, and the Fly configuration has not been deployed.
