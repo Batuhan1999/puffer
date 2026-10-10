@@ -1,1 +1,0 @@
-{ "t": "ask", "ask": { "requestId": "r_01", "agentId": "a_claude", "agentName": "Claude Code", "query": "lease deposit amount", "scope": "granted", "receivedAt": 1767225600000, "expiresAt": 1767226200000 } }
