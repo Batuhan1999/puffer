@@ -1,13 +1,13 @@
 # Puffer demo
 
-This guide runs the Puffer demo on the iPhone 17 Pro simulator (`1D4B8ECF-A717-442E-9828-FCB3F93229DB`), paired with the hosted relay at `https://puffer.fly.dev`. The demo shows two things. Puffer finds documents, notes and photos on the phone by meaning. An agent reads them over plain HTTP, under the access the user granted in Puffer.
+This guide runs the Puffer demo on the iPhone 17 Pro simulator (`<simulator-udid>`), paired with the hosted relay at `https://puffer.fly.dev`. The demo shows two things. Puffer finds documents, notes and photos on the phone by meaning. An agent reads them over plain HTTP, under the access the user granted in Puffer.
 
 The demo library belongs to a fictional person, Alex Morgan, who lives at 14 Linden Row, Apartment 3B, in the fictional city of Harborview. Every company, address, phone number and reference number in it is made up.
 
 The demo tools live in the session scratchpad. In this guide, `$DEMO` stands for that path:
 
 ```sh
-DEMO=/private/tmp/claude-501/-Users-batuhancakir-Documents-Dev-learning-local-turbopuffer/5c9dc602-fa08-4ce7-9873-9159ae34289b/scratchpad
+DEMO=/tmp/puffer-demo
 ```
 
 | Path | What it is |
@@ -42,13 +42,13 @@ Photos holds the simulator's sample photos plus three generated ones: a boarding
 1. Start Metro and Puffer on the simulator. Check first that no build is running (`pgrep -fl xcodebuild`).
 
    ```sh
-   cd /Users/batuhancakir/Documents/Dev/learning/local-turbopuffer/prototype
-   LANG=en_US.UTF-8 npx expo run:ios --device 1D4B8ECF-A717-442E-9828-FCB3F93229DB
+   cd path/to/puffer
+   LANG=en_US.UTF-8 npx expo run:ios --device <simulator-udid>
    ```
 
    If the app is already installed, `$DEMO/relaunch.sh` restarts Metro and relaunches the app instead.
 
-2. Pair the simulator with the hosted relay. Open the relay's pairing link with `xcrun simctl openurl 1D4B8ECF-A717-442E-9828-FCB3F93229DB '<puffer://pair?... link>'` and tap "Pair with puffer.fly.dev".
+2. Pair the simulator with the hosted relay. Open the relay's pairing link with `xcrun simctl openurl <simulator-udid> '<puffer://pair?... link>'` and tap "Pair with puffer.fly.dev".
 
 3. Check the demo agent. Puffer already lists "Demo Agent" with Everything and photos, and its key is in `$DEMO/demo-agent-key.txt`. The phone sends its agent list to the relay it syncs with, so that key should work on the hosted relay too. Check it with scene 1:
 

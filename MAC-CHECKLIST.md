@@ -35,7 +35,7 @@ Run each with `EXPO_PUBLIC_PUFFER_EDITOR=native` (default), `tiptap`, `enriched`
 ```sh
 npx expo prebuild --clean
 xcodebuild -workspace ios/*.xcworkspace -scheme Puffer -configuration Release \
-  -destination id=00008110-0012183C3E7B801E DEVELOPMENT_TEAM=6Z8WY4U8PP -allowProvisioningUpdates
+  -destination id=<your-iphone-udid> DEVELOPMENT_TEAM=<your-team-id> -allowProvisioningUpdates
 ```
 (Adjust the scheme name to the generated one; install with Xcode or `xcrun devicectl device install app`.)
 - [ ] Sign in, agents connect, ask/answer works.
