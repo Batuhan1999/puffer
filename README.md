@@ -6,12 +6,14 @@ Apple Notes is the best note-taking app there is, but iOS gives other apps no wa
 read or write. So I rebuilt it. Puffer is an Apple Notes clone for iPhone that Claude and other agents can search, read and
 write, with every change they make visible on the phone.
 
+<!-- Screenshots: add screenshots/notes.png, note.png, agents.png and history.png, then remove this comment line and the one after the row.
 <p align="center">
   <img src="screenshots/notes.png" width="220" alt="Folders and notes, as in Apple Notes" />
   <img src="screenshots/note.png" width="220" alt="A note with a checklist, a table and a highlight" />
   <img src="screenshots/agents.png" width="220" alt="Connected agents" />
   <img src="screenshots/history.png" width="220" alt="What each agent read and wrote" />
 </p>
+-->
 
 ## What it does
 
